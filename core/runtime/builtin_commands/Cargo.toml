@@ -1,0 +1,80 @@
+[package]
+name = "nexusshell-builtin-commands"
+version = "0.1.0"
+edition = "2021"
+description = "Built-in commands for NexusShell"
+authors = ["NexusShell Team"]
+license = "MIT"
+
+[lib]
+name = "builtin_commands"
+path = "src/lib.rs"
+
+[dependencies]
+# 基本的な依存関係
+anyhow = "1.0"
+async-trait = "0.1"
+tracing = "0.1"
+dashmap = "5.4"
+sysinfo = "0.29"
+
+# 非同期関連
+tokio = { version = "1.28", features = ["full"] }
+futures = "0.3"
+
+# ファイルシステム関連
+atty = "0.2"
+walkdir = "2.3"
+globset = "0.4"
+filetime = "0.2"
+path_absolutize = "3.1"
+directories = "5.0"
+
+# テキスト処理関連
+regex = "1.9"
+csv = "1.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+nom = "7.1"
+chrono = "0.4"
+
+# ネットワーク関連
+reqwest = { version = "0.11", features = ["json", "stream", "multipart"] }
+hyper = { version = "0.14", features = ["full"] }
+mime_guess = "2.0"
+url = "2.4"
+webbrowser = "0.8"
+percent-encoding = "2.3"
+
+# セキュリティ関連
+base64 = "0.21"
+sha2 = "0.10"
+rand = "0.8"
+
+# OS関連
+users = "0.11"
+nix = { version = "0.26", features = ["user", "fs", "process"] }
+libc = "0.2"
+
+# その他のユーティリティ
+bytesize = "1.2"
+chrono-humanize = "0.2"
+terminal_size = "0.2"
+num = "0.4"
+human_format = "1.0"
+bytes = "1.4"
+itertools = "0.11"
+lazy_static = "1.4"
+unicode-width = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.48", features = ["Win32_Foundation", "Win32_System_Console", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+termios = "0.3"
+
+[dev-dependencies]
+tempfile = "3.7"
+rstest = "0.17"
+mockall = "0.11"
+predicates = "3.0" 
