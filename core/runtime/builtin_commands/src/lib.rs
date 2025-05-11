@@ -143,26 +143,27 @@ pub fn create_default_registry() -> CommandRegistry {
     // ファイルシステムコマンド
     registry.register(Box::new(fs::ls::LsCommand));
     registry.register(Box::new(fs::find::FindCommand));
-    // registry.register(Box::new(fs::cp::CpCommand));
-    // registry.register(Box::new(fs::mv::MvCommand));
-    // registry.register(Box::new(fs::rm::RmCommand));
-    // registry.register(Box::new(fs::mkdir::MkdirCommand));
-    // registry.register(Box::new(fs::rmdir::RmdirCommand));
-    // registry.register(Box::new(fs::touch::TouchCommand));
+    registry.register(Box::new(fs::cp::CpCommand));
+    registry.register(Box::new(fs::mv::MvCommand));
+    registry.register(Box::new(fs::rm::RmCommand));
+    registry.register(Box::new(fs::mkdir::MkdirCommand));
+    registry.register(Box::new(fs::touch::TouchCommand));
     
     // テキスト処理コマンド
     registry.register(Box::new(text::map::MapCommand));
     registry.register(Box::new(text::stats::StatsCommand));
     registry.register(Box::new(text::slice::SliceCommand));
     registry.register(Box::new(text::distinct::DistinctCommand));
-    // registry.register(Box::new(text::cat::CatCommand));
-    // registry.register(Box::new(text::grep::GrepCommand));
-    // registry.register(Box::new(text::sed::SedCommand));
-    // registry.register(Box::new(text::wc::WcCommand));
-    // registry.register(Box::new(text::sort::SortCommand));
-    // registry.register(Box::new(text::uniq::UniqCommand));
-    // registry.register(Box::new(text::head::HeadCommand));
-    // registry.register(Box::new(text::tail::TailCommand));
+    registry.register(Box::new(text::cat::CatCommand));
+    registry.register(Box::new(text::grep::GrepCommand));
+    registry.register(Box::new(text::sort::SortCommand));
+    registry.register(Box::new(text::head::HeadCommand));
+    registry.register(Box::new(text::tail::TailCommand));
+    registry.register(Box::new(text::wc::WcCommand));
+    registry.register(Box::new(text::sed::SedCommand));
+    registry.register(Box::new(text::uniq::UniqCommand));
+    registry.register(Box::new(text::cut::CutCommand));
+    registry.register(Box::new(text::tr::TrCommand));
     
     // ネットワークコマンド
     registry.register(Box::new(network::curl::CurlCommand));
