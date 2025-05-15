@@ -134,11 +134,21 @@ pub fn create_default_registry() -> CommandRegistry {
     registry.register(Box::new(core::echo::EchoCommand));
     registry.register(Box::new(core::exit::ExitCommand));
     registry.register(Box::new(core::export::ExportCommand));
+    registry.register(Box::new(core::env::EnvCommand));
     
-    // 既存コマンド（将来的に実装予定）
-    // registry.register(Box::new(core::alias::AliasCommand));
-    // registry.register(Box::new(core::history::HistoryCommand));
-    // registry.register(Box::new(core::source::SourceCommand));
+    // 追加コアコマンド
+    registry.register(Box::new(core::unset::UnsetCommand::new()));
+    registry.register(Box::new(core::which::WhichCommand::new()));
+    registry.register(Box::new(core::test::TestCommand::new()));
+    registry.register(Box::new(core::alias::AliasCommand::new()));
+    registry.register(Box::new(core::unalias::UnaliasCommand::new()));
+    registry.register(Box::new(core::history::HistoryCommand::new()));
+    registry.register(Box::new(core::source::SourceCommand::new()));
+    registry.register(Box::new(core::set::SetCommand::new()));
+    registry.register(Box::new(core::jobs::JobsCommand::new()));
+    registry.register(Box::new(core::help::HelpCommand::new()));
+    registry.register(Box::new(core::type_cmd::TypeCommand::new()));
+    registry.register(Box::new(core::builtin::BuiltinCommand::new()));
     
     // ファイルシステムコマンド
     registry.register(Box::new(fs::ls::LsCommand));
@@ -150,10 +160,6 @@ pub fn create_default_registry() -> CommandRegistry {
     registry.register(Box::new(fs::touch::TouchCommand));
     
     // テキスト処理コマンド
-    registry.register(Box::new(text::map::MapCommand));
-    registry.register(Box::new(text::stats::StatsCommand));
-    registry.register(Box::new(text::slice::SliceCommand));
-    registry.register(Box::new(text::distinct::DistinctCommand));
     registry.register(Box::new(text::cat::CatCommand));
     registry.register(Box::new(text::grep::GrepCommand));
     registry.register(Box::new(text::sort::SortCommand));
@@ -164,34 +170,33 @@ pub fn create_default_registry() -> CommandRegistry {
     registry.register(Box::new(text::uniq::UniqCommand));
     registry.register(Box::new(text::cut::CutCommand));
     registry.register(Box::new(text::tr::TrCommand));
+    registry.register(Box::new(text::map::MapCommand));
+    registry.register(Box::new(text::stats::StatsCommand));
+    registry.register(Box::new(text::slice::SliceCommand));
+    registry.register(Box::new(text::distinct::DistinctCommand));
     
     // ネットワークコマンド
     registry.register(Box::new(network::curl::CurlCommand));
     registry.register(Box::new(network::httpserver::HttpServerCommand));
-    // registry.register(Box::new(network::wget::WgetCommand));
-    // registry.register(Box::new(network::ping::PingCommand));
-    // registry.register(Box::new(network::ssh::SshCommand));
     
-    // プロセス管理コマンド（将来的に実装予定）
+    // プロセス管理コマンド
+    registry.register(Box::new(process::kill::KillCommand));
+    registry.register(Box::new(process::jobs::JobsCommand));
+    
+    // システム情報コマンド
     registry.register(Box::new(system::ps::PsCommand));
-    // registry.register(Box::new(process::kill::KillCommand));
-    // registry.register(Box::new(process::jobs::JobsCommand));
-    // registry.register(Box::new(process::fg::FgCommand));
-    // registry.register(Box::new(process::bg::BgCommand));
+    registry.register(Box::new(system::uname::UnameCommand));
+    registry.register(Box::new(system::uptime::UptimeCommand));
     
-    // システム情報コマンド（将来的に実装予定）
-    // registry.register(Box::new(system::uname::UnameCommand));
-    // registry.register(Box::new(system::uptime::UptimeCommand));
-    // registry.register(Box::new(system::df::DfCommand));
-    // registry.register(Box::new(system::free::FreeCommand));
+    // セキュリティコマンド
+    registry.register(Box::new(security::chmod::ChmodCommand::new()));
+    registry.register(Box::new(security::chown::ChownCommand::new()));
+    registry.register(Box::new(security::umask::UmaskCommand::new()));
+    registry.register(Box::new(security::su::SuCommand::new()));
+    registry.register(Box::new(security::passwd::PasswdCommand::new()));
     
-    // セキュリティコマンド（将来的に実装予定）
-    // registry.register(Box::new(security::chmod::ChmodCommand));
-    // registry.register(Box::new(security::chown::ChownCommand));
-    // registry.register(Box::new(security::passwd::PasswdCommand));
-    
-    // プラグイン管理コマンド（将来的に実装予定）
-    // registry.register(Box::new(plugin::plugin::PluginCommand));
+    // プラグイン管理コマンド
+    registry.register(Box::new(plugin::plugin::PluginCommand));
     
     registry
 } 

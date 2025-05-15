@@ -1,0 +1,216 @@
+name: リリースビルド
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  create-release:
+    name: リリース作成
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: リリース作成
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: NexusShell ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+
+  build-windows:
+    name: Windows用ビルド
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Rustツールチェーンのセットアップ
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: WiXツールセットのインストール
+        run: |
+          cargo install cargo-wix
+      - name: ビルド
+        run: |
+          cargo build --release
+      - name: MSIインストーラー作成
+        run: |
+          cargo wix --no-build
+      - name: タグからバージョン抽出
+        id: get_version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      - name: 実行ファイルをアップロード
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/release/nexus-shell.exe
+          asset_name: nexus-shell-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.exe
+          asset_content_type: application/octet-stream
+      - name: MSIインストーラーをアップロード
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/wix/nexus-shell-${{ steps.get_version.outputs.VERSION }}-x86_64.msi
+          asset_name: nexus-shell-${{ steps.get_version.outputs.VERSION }}-windows-x86_64.msi
+          asset_content_type: application/octet-stream
+
+  build-linux:
+    name: Linux用ビルド
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Rustツールチェーンのセットアップ
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: 必要なツールのインストール
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          cargo install cargo-deb
+          cargo install cargo-rpm
+      - name: ビルド
+        run: |
+          cargo build --release
+      - name: Debianパッケージ作成
+        run: |
+          cargo deb
+      - name: RPMパッケージ作成
+        run: |
+          cargo rpm build
+      - name: タグからバージョン抽出
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      - name: 実行ファイルをアップロード
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/release/nexus-shell
+          asset_name: nexus-shell-${{ steps.get_version.outputs.VERSION }}-linux-x86_64
+          asset_content_type: application/octet-stream
+      - name: Debianパッケージをアップロード
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/debian/nexus-shell_${{ steps.get_version.outputs.VERSION }}_amd64.deb
+          asset_name: nexus-shell-${{ steps.get_version.outputs.VERSION }}-amd64.deb
+          asset_content_type: application/octet-stream
+      - name: RPMパッケージをアップロード
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/release/rpmbuild/RPMS/x86_64/nexus-shell-${{ steps.get_version.outputs.VERSION }}-1.x86_64.rpm
+          asset_name: nexus-shell-${{ steps.get_version.outputs.VERSION }}-1.x86_64.rpm
+          asset_content_type: application/octet-stream
+
+  build-macos:
+    name: macOS用ビルド
+    needs: create-release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Rustツールチェーンのセットアップ
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: create-dmgのインストール
+        run: |
+          brew install create-dmg
+      - name: ビルド
+        run: |
+          cargo build --release
+      - name: macOSアプリバンドルとDMG作成
+        run: |
+          VERSION=$(grep "^version" Cargo.toml | head -n 1 | cut -d'"' -f2)
+          mkdir -p dist/NexusShell.app/Contents/{MacOS,Resources}
+          cp target/release/nexus-shell dist/NexusShell.app/Contents/MacOS/
+          
+          # Info.plistの作成
+          cat > dist/NexusShell.app/Contents/Info.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>nexus-shell</string>
+              <key>CFBundleIconFile</key>
+              <string>AppIcon</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.nexusshell.app</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>NexusShell</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${VERSION}</string>
+              <key>CFBundleVersion</key>
+              <string>${VERSION}</string>
+              <key>NSHumanReadableCopyright</key>
+              <string>Copyright © 2024 NexusShell Team. All rights reserved.</string>
+          </dict>
+          </plist>
+          EOF
+          
+          # アイコンがあればコピー
+          if [ -f "res/nexus-shell.icns" ]; then
+              cp res/nexus-shell.icns dist/NexusShell.app/Contents/Resources/AppIcon.icns
+          fi
+          
+          # DMG作成
+          create-dmg \
+              --volname "NexusShell ${VERSION}" \
+              --window-pos 200 120 \
+              --window-size 800 400 \
+              --icon-size 100 \
+              --icon "NexusShell.app" 200 190 \
+              --hide-extension "NexusShell.app" \
+              --app-drop-link 600 185 \
+              "dist/NexusShell-${VERSION}.dmg" \
+              "dist/NexusShell.app"
+      - name: タグからバージョン抽出
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      - name: 実行ファイルをアップロード
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/release/nexus-shell
+          asset_name: nexus-shell-${{ steps.get_version.outputs.VERSION }}-macos-x86_64
+          asset_content_type: application/octet-stream
+      - name: DMGパッケージをアップロード
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./dist/NexusShell-${{ steps.get_version.outputs.VERSION }}.dmg
+          asset_name: NexusShell-${{ steps.get_version.outputs.VERSION }}-macos.dmg
+          asset_content_type: application/octet-stream 

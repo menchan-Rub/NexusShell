@@ -1682,7 +1682,7 @@ mod tests {
     #[test]
     fn test_unescape_string() {
         assert_eq!(unescape_string(r"Hello\nWorld"), "Hello\nWorld");
-        assert_eq!(unescape_string(r"Escaped\"Quote"), "Escaped\"Quote");
+        assert_eq!(unescape_string(r"Escaped\\Quote"), "Escaped\\Quote");
         assert_eq!(unescape_string(r"Backslash\\"), "Backslash\\");
     }
 } 

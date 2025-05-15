@@ -18,7 +18,18 @@ pub mod completion;
 pub mod grammar;
 pub mod ast;
 pub mod token;
+pub mod error;
+pub mod span;
+pub mod context;
 pub mod env_resolver;
+pub mod interpreter;
+pub mod tests;
+pub mod completer;
+pub mod predictor;
+pub mod plugin;
+pub mod metrics;
+pub mod error_recovery;
+pub mod type_system;
 
 /// 位置情報
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +79,28 @@ pub enum ParserError {
         span: Span,
     },
     
+    #[error("予期されるトークンが見つかりません: 期待={expected:?}, 実際={found:?} at {span}")]
+    ExpectedToken {
+        expected: TokenKind,
+        found: TokenKind,
+        span: Span,
+    },
+    
+    #[error("複数のトークンのいずれかが予期されます: 期待={expected:?}, 実際={found:?} at {span}")]
+    ExpectedOneOf {
+        expected: Vec<TokenKind>,
+        found: TokenKind,
+        span: Span,
+    },
+    
+    #[error("対応するデリミタが一致しません: 開始={opening:?}, 期待する終了={expected_closing:?}, 実際={found:?} at {span}")]
+    MismatchedDelimiter {
+        opening: TokenKind,
+        expected_closing: TokenKind,
+        found: Option<TokenKind>,
+        span: Span,
+    },
+    
     #[error("未知のトークン: {0} at {1}")]
     UnknownToken(String, Span),
     
@@ -95,6 +128,9 @@ pub enum ParserError {
     #[error("型の不一致: {0} at {1}")]
     TypeMismatch(String, Span),
     
+    #[error("型システムエラー: {0} at {1}")]
+    TypeError(String, Span),
+    
     #[error("エラーの連鎖: {0}")]
     ChainedError(Box<ParserError>),
     
@@ -103,6 +139,27 @@ pub enum ParserError {
     
     #[error("内部エラー: {0}")]
     InternalError(String),
+    
+    #[error("予期しないEOF: {0}")]
+    UnexpectedEOF(String),
+    
+    #[error("プラグインエラー: {0}")]
+    PluginError(String),
+    
+    #[error("補完エラー: {0}")]
+    CompletionError(String),
+    
+    #[error("予測エラー: {0}")]
+    PredictionError(String),
+    
+    #[error("メトリクスエラー: {0}")]
+    MetricsError(String),
+    
+    #[error("エラー回復失敗: {0}")]
+    RecoveryError(String),
+    
+    #[error("型検証エラー: {0}")]
+    ValidationError(String),
 }
 
 /// エラーの深刻度
@@ -283,7 +340,91 @@ pub enum AstNode {
         message: String,
         span: Span,
     },
-    // 他の構文ノード...
+    Terminal {
+        token_kind: TokenKind,
+        lexeme: String,
+        span: Span,
+    },
+    NonTerminal {
+        name: String,
+        children: Vec<AstNode>,
+        span: Span,
+    },
+    Sequence {
+        children: Vec<AstNode>,
+        span: Span,
+    },
+    Choice {
+        value: Box<AstNode>,
+        span: Span,
+    },
+    Repetition {
+        children: Vec<AstNode>,
+        span: Span,
+    },
+    Optional {
+        value: Option<Box<AstNode>>,
+        span: Span,
+    },
+    Literal {
+        value: String,
+        kind: TokenKind,
+        span: Span,
+    },
+    Variable {
+        name: Box<AstNode>,
+        span: Span,
+    },
+    Assignment {
+        left: Box<AstNode>,
+        right: Box<AstNode>,
+        span: Span,
+    },
+    Program {
+        statements: Vec<AstNode>,
+        span: Span,
+    },
+    Empty {
+        span: Span,
+    },
+}
+
+impl AstNode {
+    /// ノードのスパン情報を返す
+    pub fn span(&self) -> &Span {
+        match self {
+            AstNode::Command { span, .. } => span,
+            AstNode::Argument { span, .. } => span,
+            AstNode::Option { span, .. } => span,
+            AstNode::Pipeline { span, .. } => span,
+            AstNode::Redirection { span, .. } => span,
+            AstNode::Block { span, .. } => span,
+            AstNode::VariableAssignment { span, .. } => span,
+            AstNode::VariableReference { span, .. } => span,
+            AstNode::Subshell { span, .. } => span,
+            AstNode::Conditional { span, .. } => span,
+            AstNode::Loop { span, .. } => span,
+            AstNode::FunctionDefinition { span, .. } => span,
+            AstNode::Alias { span, .. } => span,
+            AstNode::ArrayLiteral { span, .. } => span,
+            AstNode::MapLiteral { span, .. } => span,
+            AstNode::PathExpansion { span, .. } => span,
+            AstNode::Background { span, .. } => span,
+            AstNode::Group { span, .. } => span,
+            AstNode::Error { span, .. } => span,
+            AstNode::Terminal { span, .. } => span,
+            AstNode::NonTerminal { span, .. } => span,
+            AstNode::Sequence { span, .. } => span,
+            AstNode::Choice { span, .. } => span,
+            AstNode::Repetition { span, .. } => span,
+            AstNode::Optional { span, .. } => span,
+            AstNode::Literal { span, .. } => span,
+            AstNode::Variable { span, .. } => span,
+            AstNode::Assignment { span, .. } => span,
+            AstNode::Program { span, .. } => span,
+            AstNode::Empty { span } => span,
+        }
+    }
 }
 
 /// パイプラインの種類
@@ -969,4 +1110,87 @@ impl DefaultLexer {
             position: start_pos,
         }, length)
     }
+}
+
+/// 高度な解析・型検証・エラー回復を備えた解析を行う
+///
+/// # 引数
+/// * `input` - 解析する入力文字列
+///
+/// # 戻り値
+/// * `Result<AstNode>` - 解析成功時はASTのルートノード、失敗時はエラー情報
+pub fn parse_with_recovery(input: &str) -> Result<AstNode> {
+    let mut lexer = DefaultLexer::new();
+    let mut parser = DefaultParser::new();
+    
+    // 字句解析を実行
+    let tokens = lexer.tokenize(input)?;
+    
+    // 構文解析を実行
+    let mut context = ParserContext::new(input.to_string());
+    context.tokens = tokens;
+    
+    // エラー回復マネージャーを作成
+    let mut recovery_manager = error_recovery::create_error_recovery_manager();
+    
+    // 解析を試行
+    match parser.parse_with_context(&mut context) {
+        Ok(ast) => {
+            // 型チェックを実行
+            let mut type_checker = type_system::create_type_checker();
+            match type_checker.check(&ast) {
+                Ok(_) => Ok(ast),
+                Err(e) => {
+                    if type_checker.error_count() > 0 {
+                        // 型エラーはあるが、ASTは返す（警告として）
+                        Ok(ast)
+                    } else {
+                        // 致命的な型エラー
+                        Err(e)
+                    }
+                }
+            }
+        },
+        Err(e) => {
+            // エラー回復を試みる
+            match error_recovery::recover_from_error(&mut recovery_manager, &mut context, &e) {
+                Ok(repair_result) => {
+                    // 回復成功、再度解析を試みる
+                    parser.parse_with_context(&mut context)
+                },
+                Err(_) => {
+                    // 回復失敗
+                    Err(e)
+                }
+            }
+        }
+    }
+}
+
+/// 厳格な型チェックを行う解析を実行
+///
+/// # 引数
+/// * `input` - 解析する入力文字列
+///
+/// # 戻り値
+/// * `Result<AstNode>` - 解析成功時はASTのルートノード、失敗時はエラー情報
+pub fn parse_with_strict_typing(input: &str) -> Result<AstNode> {
+    let mut lexer = DefaultLexer::new();
+    let mut parser = DefaultParser::new();
+    
+    // 字句解析を実行
+    let tokens = lexer.tokenize(input)?;
+    
+    // 構文解析を実行
+    let mut context = ParserContext::new(input.to_string());
+    context.tokens = tokens;
+    
+    // 解析を実行
+    let ast = parser.parse_with_context(&mut context)?;
+    
+    // 厳格な型チェックを実行
+    let mut type_checker = type_system::create_strict_type_checker();
+    type_checker.check(&ast)?;
+    
+    Ok(ast)
 }

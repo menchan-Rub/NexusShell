@@ -2,10 +2,16 @@ use crate::{
     AstNode, Error, Result, Span, TokenKind, ParserContext, ParserError,
     RedirectionKind, PipelineKind
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
+use parking_lot::Mutex;
+use dashmap::DashMap;
+use rayon::prelude::*;
+use uuid::Uuid;
 
 /// セマンティック解析ステージの種類
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +30,14 @@ pub enum SemanticStage {
     DataFlowAnalysis,
     /// リソース使用分析ステージ
     ResourceUsageAnalysis,
+    /// 副作用分析ステージ
+    SideEffectAnalysis,
+    /// 並列化可能性分析ステージ
+    ParallelizabilityAnalysis,
+    /// 静的最適化ステージ 
+    StaticOptimization,
+    /// セキュリティ分析ステージ
+    SecurityAnalysis,
 }
 
 /// セマンティック解析器のトレイト
@@ -33,6 +47,15 @@ pub trait Analyzer {
     
     /// 指定したステージのみを実行
     fn analyze_stage(&mut self, node: &AstNode, stage: SemanticStage) -> Result<AstNode>;
+    
+    /// 複数のステージを指定して実行
+    fn analyze_stages(&mut self, node: &AstNode, stages: &[SemanticStage]) -> Result<AstNode>;
+    
+    /// 非同期で解析を実行
+    async fn analyze_async(&mut self, node: &AstNode) -> Result<AstNode>;
+    
+    /// 並列解析を実行
+    fn analyze_parallel(&mut self, node: &AstNode) -> Result<AstNode>;
 }
 
 /// 環境変数のスコープ
@@ -590,29 +613,517 @@ struct SymbolInfo {
     name: String,
     /// シンボルの種類
     kind: SymbolKind,
+    /// 型情報
+    shell_type: ShellType,
     /// 定義位置
     defined_at: Span,
     /// 参照位置
     references: Vec<Span>,
-    /// スコープ
-    scope: String,
-    /// アトリビュート（追加情報）
+    /// スコープID
+    scope_id: String,
+    /// 属性（メタデータ）
     attributes: HashMap<String, String>,
+    /// 定数値（定数の場合）
+    constant_value: Option<String>,
+    /// ドキュメンテーション
+    documentation: Option<String>,
+    /// 変数が初期化済みかどうか
+    initialized: bool,
 }
 
 /// シンボルの種類
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum SymbolKind {
-    /// 変数
-    Variable,
+pub enum SymbolKind {
+    /// ローカル変数
+    LocalVariable,
+    /// グローバル変数
+    GlobalVariable,
+    /// エクスポートされた変数
+    ExportedVariable,
+    /// 定数
+    Constant,
     /// 関数
     Function,
     /// エイリアス
     Alias,
+    /// コマンド
+    Command,
     /// 引数
     Argument,
     /// 環境変数
-    Environment,
+    EnvironmentVariable,
+    /// パラメータ
+    Parameter,
+    /// 戻り値
+    ReturnValue,
+}
+
+impl fmt::Display for SymbolKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LocalVariable => write!(f, "ローカル変数"),
+            Self::GlobalVariable => write!(f, "グローバル変数"),
+            Self::ExportedVariable => write!(f, "エクスポート変数"),
+            Self::Constant => write!(f, "定数"),
+            Self::Function => write!(f, "関数"),
+            Self::Alias => write!(f, "エイリアス"),
+            Self::Command => write!(f, "コマンド"),
+            Self::Argument => write!(f, "引数"),
+            Self::EnvironmentVariable => write!(f, "環境変数"),
+            Self::Parameter => write!(f, "パラメータ"),
+            Self::ReturnValue => write!(f, "戻り値"),
+        }
+    }
+}
+
+/// 新しい型システム - シェル値の型
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShellType {
+    /// 文字列型
+    String,
+    /// 整数型
+    Integer,
+    /// 浮動小数点型
+    Float,
+    /// 真偽値型
+    Boolean,
+    /// 配列型
+    Array(Box<ShellType>),
+    /// マップ型
+    Map(Box<ShellType>, Box<ShellType>),
+    /// パス型
+    Path,
+    /// コマンド型
+    Command,
+    /// 関数型
+    Function(Vec<ShellType>, Box<ShellType>),
+    /// ストリーム型
+    Stream(Box<ShellType>),
+    /// ファイルディスクリプタ型
+    FileDescriptor,
+    /// プロセスID型
+    ProcessId,
+    /// ジョブID型
+    JobId,
+    /// 正規表現型
+    Regex,
+    /// 日付時刻型
+    DateTime,
+    /// 任意型（型推論に使用）
+    Any,
+    /// 未知型（エラー状態）
+    Unknown,
+    /// ユニオン型（複数の型の可能性がある）
+    Union(Vec<ShellType>),
+    /// オプション型（値があるかないか）
+    Option(Box<ShellType>),
+    /// 結果型（成功または失敗）
+    Result(Box<ShellType>, Box<ShellType>),
+}
+
+impl ShellType {
+    /// 型の互換性をチェック
+    pub fn is_compatible_with(&self, other: &ShellType) -> bool {
+        match (self, other) {
+            (ShellType::Any, _) | (_, ShellType::Any) => true,
+            (ShellType::Unknown, _) | (_, ShellType::Unknown) => false,
+            (ShellType::String, ShellType::String) => true,
+            (ShellType::Integer, ShellType::Integer) => true,
+            (ShellType::Float, ShellType::Float) => true,
+            (ShellType::Boolean, ShellType::Boolean) => true,
+            (ShellType::Path, ShellType::Path) => true,
+            (ShellType::Integer, ShellType::Float) | (ShellType::Float, ShellType::Integer) => true,
+            (ShellType::String, ShellType::Path) | (ShellType::Path, ShellType::String) => true,
+            (ShellType::Array(t1), ShellType::Array(t2)) => t1.is_compatible_with(t2),
+            (ShellType::Map(k1, v1), ShellType::Map(k2, v2)) => 
+                k1.is_compatible_with(k2) && v1.is_compatible_with(v2),
+            (ShellType::Function(p1, r1), ShellType::Function(p2, r2)) => {
+                if p1.len() != p2.len() {
+                    return false;
+                }
+                
+                for (param1, param2) in p1.iter().zip(p2.iter()) {
+                    if !param1.is_compatible_with(param2) {
+                        return false;
+                    }
+                }
+                
+                r1.is_compatible_with(r2)
+            },
+            (ShellType::Stream(t1), ShellType::Stream(t2)) => t1.is_compatible_with(t2),
+            (ShellType::Option(t1), ShellType::Option(t2)) => t1.is_compatible_with(t2),
+            (ShellType::Result(ok1, err1), ShellType::Result(ok2, err2)) => 
+                ok1.is_compatible_with(ok2) && err1.is_compatible_with(err2),
+            (ShellType::Union(types1), _) => types1.iter().any(|t| t.is_compatible_with(other)),
+            (_, ShellType::Union(types2)) => types2.iter().any(|t| self.is_compatible_with(t)),
+            _ => false,
+        }
+    }
+    
+    /// 型を結合（ユニオン型の作成）
+    pub fn union_with(&self, other: &ShellType) -> ShellType {
+        if self.is_compatible_with(other) {
+            // 互換性がある場合は、より一般的な型を返す
+            self.generalize(other)
+        } else {
+            // 互換性がない場合はユニオン型を作成
+            match (self, other) {
+                (ShellType::Union(types1), ShellType::Union(types2)) => {
+                    let mut types = types1.clone();
+                    for t in types2 {
+                        if !types.contains(t) {
+                            types.push(t.clone());
+                        }
+                    }
+                    ShellType::Union(types)
+                },
+                (ShellType::Union(types), other_type) | (other_type, ShellType::Union(types)) => {
+                    let mut new_types = types.clone();
+                    if !new_types.contains(other_type) {
+                        new_types.push(other_type.clone());
+                    }
+                    ShellType::Union(new_types)
+                },
+                (t1, t2) => ShellType::Union(vec![t1.clone(), t2.clone()]),
+            }
+        }
+    }
+    
+    /// 型の一般化（より広い型に変換）
+    pub fn generalize(&self, other: &ShellType) -> ShellType {
+        match (self, other) {
+            (ShellType::Any, _) => ShellType::Any,
+            (_, ShellType::Any) => ShellType::Any,
+            (ShellType::Unknown, other) => other.clone(),
+            (other, ShellType::Unknown) => other.clone(),
+            (ShellType::Integer, ShellType::Float) | (ShellType::Float, ShellType::Integer) => ShellType::Float,
+            (ShellType::String, ShellType::Path) | (ShellType::Path, ShellType::String) => ShellType::String,
+            (ShellType::Option(t1), ShellType::Option(t2)) => 
+                ShellType::Option(Box::new(t1.generalize(t2))),
+            (ShellType::Array(t1), ShellType::Array(t2)) => 
+                ShellType::Array(Box::new(t1.generalize(t2))),
+            (ShellType::Stream(t1), ShellType::Stream(t2)) => 
+                ShellType::Stream(Box::new(t1.generalize(t2))),
+            (t1, t2) if t1 == t2 => t1.clone(),
+            _ => ShellType::Union(vec![self.clone(), other.clone()]),
+        }
+    }
+    
+    /// 型の具体化（より具体的な型に変換）
+    pub fn concretize(&self) -> ShellType {
+        match self {
+            ShellType::Any => ShellType::String, // デフォルトは文字列型
+            ShellType::Union(types) if !types.is_empty() => types[0].clone(),
+            ShellType::Option(inner) => inner.concretize(),
+            ShellType::Result(ok, _) => ok.concretize(),
+            _ => self.clone(),
+        }
+    }
+    
+    /// 型変換が可能かどうかをチェック
+    pub fn can_convert_to(&self, target: &ShellType) -> bool {
+        match (self, target) {
+            (_, ShellType::Any) => true,
+            (ShellType::Any, _) => true,
+            (ShellType::String, ShellType::Integer) => true,
+            (ShellType::String, ShellType::Float) => true,
+            (ShellType::String, ShellType::Boolean) => true,
+            (ShellType::String, ShellType::Path) => true,
+            (ShellType::String, ShellType::Regex) => true,
+            (ShellType::String, ShellType::DateTime) => true,
+            (ShellType::Integer, ShellType::String) => true,
+            (ShellType::Integer, ShellType::Float) => true,
+            (ShellType::Integer, ShellType::Boolean) => true,
+            (ShellType::Float, ShellType::String) => true,
+            (ShellType::Float, ShellType::Integer) => true,
+            (ShellType::Boolean, ShellType::String) => true,
+            (ShellType::Boolean, ShellType::Integer) => true,
+            (ShellType::Path, ShellType::String) => true,
+            (ShellType::DateTime, ShellType::String) => true,
+            (ShellType::Array(_), ShellType::String) => true,
+            (ShellType::Map(_, _), ShellType::String) => true,
+            (s, t) => s.is_compatible_with(t),
+        }
+    }
+}
+
+impl fmt::Display for ShellType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ShellType::String => write!(f, "string"),
+            ShellType::Integer => write!(f, "integer"),
+            ShellType::Float => write!(f, "float"),
+            ShellType::Boolean => write!(f, "boolean"),
+            ShellType::Array(t) => write!(f, "array<{}>", t),
+            ShellType::Map(k, v) => write!(f, "map<{}, {}>", k, v),
+            ShellType::Path => write!(f, "path"),
+            ShellType::Command => write!(f, "command"),
+            ShellType::Function(params, ret) => {
+                write!(f, "fn(")?;
+                for (i, param) in params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", param)?;
+                }
+                write!(f, ") -> {}", ret)
+            },
+            ShellType::Stream(t) => write!(f, "stream<{}>", t),
+            ShellType::FileDescriptor => write!(f, "fd"),
+            ShellType::ProcessId => write!(f, "pid"),
+            ShellType::JobId => write!(f, "jobid"),
+            ShellType::Regex => write!(f, "regex"),
+            ShellType::DateTime => write!(f, "datetime"),
+            ShellType::Any => write!(f, "any"),
+            ShellType::Unknown => write!(f, "unknown"),
+            ShellType::Union(types) => {
+                for (i, t) in types.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " | ")?;
+                    }
+                    write!(f, "{}", t)?;
+                }
+                Ok(())
+            },
+            ShellType::Option(t) => write!(f, "option<{}>", t),
+            ShellType::Result(ok, err) => write!(f, "result<{}, {}>", ok, err),
+        }
+    }
+}
+
+/// 高度なシンボルテーブル
+#[derive(Debug, Clone)]
+pub struct SymbolTable {
+    /// シンボルマップ（名前 -> シンボル情報）
+    symbols: HashMap<String, SymbolInfo>,
+    /// 親スコープ
+    parent: Option<Arc<RwLock<SymbolTable>>>,
+    /// スコープID
+    scope_id: String,
+    /// スコープ名
+    scope_name: String,
+    /// スコープの開始位置
+    scope_span: Span,
+}
+
+impl SymbolTable {
+    /// 新しいシンボルテーブルを作成
+    pub fn new(name: &str, span: Span) -> Self {
+        let scope_id = Uuid::new_v4().to_string();
+        Self {
+            symbols: HashMap::new(),
+            parent: None,
+            scope_id,
+            scope_name: name.to_string(),
+            scope_span: span,
+        }
+    }
+    
+    /// 親スコープを持つ新しいシンボルテーブルを作成
+    pub fn with_parent(name: &str, span: Span, parent: Arc<RwLock<SymbolTable>>) -> Self {
+        let scope_id = Uuid::new_v4().to_string();
+        Self {
+            symbols: HashMap::new(),
+            parent: Some(parent),
+            scope_id,
+            scope_name: name.to_string(),
+            scope_span: span,
+        }
+    }
+    
+    /// シンボルを定義
+    pub fn define(&mut self, symbol: SymbolInfo) -> Result<()> {
+        let name = symbol.name.clone();
+        if self.symbols.contains_key(&name) {
+            return Err(ParserError::SemanticError(
+                format!("シンボル '{}'は既に定義されています", name),
+                symbol.defined_at,
+            ));
+        }
+        
+        self.symbols.insert(name, symbol);
+        Ok(())
+    }
+    
+    /// シンボルを更新
+    pub fn update(&mut self, symbol: SymbolInfo) -> bool {
+        let name = symbol.name.clone();
+        if self.symbols.contains_key(&name) {
+            self.symbols.insert(name, symbol);
+            true
+        } else {
+            false
+        }
+    }
+    
+    /// シンボルを参照
+    pub fn reference(&mut self, name: &str, usage_span: Span) -> Result<()> {
+        if let Some(symbol) = self.symbols.get_mut(name) {
+            symbol.references.push(usage_span);
+            Ok(())
+        } else if let Some(parent) = &self.parent {
+            let mut parent = parent.write().unwrap();
+            parent.reference(name, usage_span)
+        } else {
+            Err(ParserError::SemanticError(
+                format!("未定義のシンボル '{}'を参照しています", name),
+                usage_span,
+            ))
+        }
+    }
+    
+    /// シンボルを検索
+    pub fn lookup(&self, name: &str) -> Option<SymbolInfo> {
+        if let Some(symbol) = self.symbols.get(name) {
+            Some(symbol.clone())
+        } else if let Some(parent) = &self.parent {
+            let parent = parent.read().unwrap();
+            parent.lookup(name)
+        } else {
+            None
+        }
+    }
+    
+    /// このスコープで定義されたシンボルのみを検索
+    pub fn lookup_local(&self, name: &str) -> Option<SymbolInfo> {
+        self.symbols.get(name).cloned()
+    }
+    
+    /// すべてのシンボルを取得
+    pub fn get_all_symbols(&self) -> Vec<SymbolInfo> {
+        self.symbols.values().cloned().collect()
+    }
+    
+    /// 未使用のシンボルを検索
+    pub fn find_unused_symbols(&self) -> Vec<SymbolInfo> {
+        self.symbols.values()
+            .filter(|s| s.references.is_empty() && s.kind != SymbolKind::ExportedVariable)
+            .cloned()
+            .collect()
+    }
+}
+
+/// シンボル情報
+#[derive(Debug, Clone)]
+pub struct SymbolInfo {
+    /// シンボル名
+    pub name: String,
+    /// シンボルの種類
+    pub kind: SymbolKind,
+    /// 型情報
+    pub shell_type: ShellType,
+    /// 定義位置
+    pub defined_at: Span,
+    /// 参照位置
+    pub references: Vec<Span>,
+    /// スコープID
+    pub scope_id: String,
+    /// 属性（メタデータ）
+    pub attributes: HashMap<String, String>,
+    /// 定数値（定数の場合）
+    pub constant_value: Option<String>,
+    /// ドキュメンテーション
+    pub documentation: Option<String>,
+    /// 変数が初期化済みかどうか
+    pub initialized: bool,
+}
+
+impl SymbolInfo {
+    /// 新しいシンボル情報を作成
+    pub fn new(
+        name: &str,
+        kind: SymbolKind,
+        shell_type: ShellType,
+        defined_at: Span,
+        scope_id: &str,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            kind,
+            shell_type,
+            defined_at,
+            references: Vec::new(),
+            scope_id: scope_id.to_string(),
+            attributes: HashMap::new(),
+            constant_value: None,
+            documentation: None,
+            initialized: false,
+        }
+    }
+    
+    /// 属性を追加
+    pub fn with_attribute(mut self, key: &str, value: &str) -> Self {
+        self.attributes.insert(key.to_string(), value.to_string());
+        self
+    }
+    
+    /// 定数値を設定
+    pub fn with_constant_value(mut self, value: &str) -> Self {
+        self.constant_value = Some(value.to_string());
+        self
+    }
+    
+    /// ドキュメンテーションを設定
+    pub fn with_documentation(mut self, docs: &str) -> Self {
+        self.documentation = Some(docs.to_string());
+        self
+    }
+    
+    /// 初期化済みとしてマーク
+    pub fn mark_initialized(mut self) -> Self {
+        self.initialized = true;
+        self
+    }
+    
+    /// シンボルが使用されているかどうか
+    pub fn is_used(&self) -> bool {
+        !self.references.is_empty()
+    }
+}
+
+/// シンボルの種類
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolKind {
+    /// ローカル変数
+    LocalVariable,
+    /// グローバル変数
+    GlobalVariable,
+    /// エクスポートされた変数
+    ExportedVariable,
+    /// 定数
+    Constant,
+    /// 関数
+    Function,
+    /// エイリアス
+    Alias,
+    /// コマンド
+    Command,
+    /// 引数
+    Argument,
+    /// 環境変数
+    EnvironmentVariable,
+    /// パラメータ
+    Parameter,
+    /// 戻り値
+    ReturnValue,
+}
+
+impl fmt::Display for SymbolKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LocalVariable => write!(f, "ローカル変数"),
+            Self::GlobalVariable => write!(f, "グローバル変数"),
+            Self::ExportedVariable => write!(f, "エクスポート変数"),
+            Self::Constant => write!(f, "定数"),
+            Self::Function => write!(f, "関数"),
+            Self::Alias => write!(f, "エイリアス"),
+            Self::Command => write!(f, "コマンド"),
+            Self::Argument => write!(f, "引数"),
+            Self::EnvironmentVariable => write!(f, "環境変数"),
+            Self::Parameter => write!(f, "パラメータ"),
+            Self::ReturnValue => write!(f, "戻り値"),
+        }
+    }
 }
 
 /// コマンド情報
@@ -1403,3 +1914,682 @@ mod tests {
         }
     }
 } 
+
+/// 高度なデータフロー解析
+#[derive(Debug)]
+pub struct DataFlowAnalyzer {
+    /// 現在の解析中のコンテキスト
+    current_context: Option<Arc<SemanticContext>>,
+    /// シンボルテーブル
+    symbol_table: Arc<RwLock<SymbolTable>>,
+    /// 変数定義マップ (変数名 -> 定義ノード)
+    definitions: HashMap<String, Arc<AstNode>>,
+    /// 変数使用マップ (変数名 -> 使用ノードリスト)
+    uses: HashMap<String, Vec<Arc<AstNode>>>,
+    /// ノード間のデータフロー関係 (ノードID -> 依存ノードIDリスト)
+    flow_edges: HashMap<usize, Vec<usize>>,
+    /// ノードIDカウンター
+    node_id_counter: usize,
+    /// ノードIDマップ (AstNode -> ID)
+    node_id_map: HashMap<usize, usize>,
+}
+
+impl DataFlowAnalyzer {
+    /// 新しいデータフロー解析器を作成
+    pub fn new(symbol_table: Arc<RwLock<SymbolTable>>) -> Self {
+        Self {
+            current_context: None,
+            symbol_table,
+            definitions: HashMap::new(),
+            uses: HashMap::new(),
+            flow_edges: HashMap::new(),
+            node_id_counter: 0,
+            node_id_map: HashMap::new(),
+        }
+    }
+    
+    /// ノードにIDを割り当て
+    fn assign_node_id(&mut self, node: &AstNode) -> usize {
+        let node_ptr = node as *const AstNode as usize;
+        
+        if let Some(id) = self.node_id_map.get(&node_ptr) {
+            return *id;
+        }
+        
+        let id = self.node_id_counter;
+        self.node_id_counter += 1;
+        self.node_id_map.insert(node_ptr, id);
+        id
+    }
+    
+    /// データフロー解析を実行
+    pub fn analyze(&mut self, node: &AstNode) -> Result<()> {
+        // 変数定義と使用を収集
+        self.collect_definitions_and_uses(node)?;
+        
+        // データフロー関係を構築
+        self.build_flow_graph()?;
+        
+        Ok(())
+    }
+    
+    /// 変数定義と使用を収集
+    fn collect_definitions_and_uses(&mut self, node: &AstNode) -> Result<()> {
+        match node {
+            AstNode::VariableAssignment { name, value, export, span } => {
+                let node_id = self.assign_node_id(node);
+                let value_id = self.assign_node_id(value);
+                
+                // フローエッジを追加（値から代入へ）
+                self.add_flow_edge(value_id, node_id);
+                
+                // 定義を記録
+                self.definitions.insert(name.clone(), Arc::new(node.clone()));
+                
+                // シンボルテーブルに変数を追加
+                let kind = if *export {
+                    SymbolKind::ExportedVariable
+                } else {
+                    SymbolKind::LocalVariable
+                };
+                
+                let mut symbol_table = self.symbol_table.write().unwrap();
+                let symbol = SymbolInfo::new(
+                    name,
+                    kind,
+                    ShellType::Unknown, // 型推論は後で行う
+                    *span,
+                    &symbol_table.scope_id,
+                ).mark_initialized();
+                
+                symbol_table.define(symbol)?;
+                
+                // 値のノードを再帰的に処理
+                self.collect_definitions_and_uses(value)?;
+            },
+            
+            AstNode::VariableReference { name, default_value, span } => {
+                let node_id = self.assign_node_id(node);
+                
+                // 使用を記録
+                self.uses.entry(name.clone())
+                    .or_insert_with(Vec::new)
+                    .push(Arc::new(node.clone()));
+                
+                // シンボルテーブルで参照をマーク
+                let mut symbol_table = self.symbol_table.write().unwrap();
+                symbol_table.reference(name, *span)?;
+                
+                // デフォルト値があれば処理
+                if let Some(default) = default_value {
+                    let default_id = self.assign_node_id(default);
+                    self.add_flow_edge(default_id, node_id);
+                    self.collect_definitions_and_uses(default)?;
+                }
+            },
+            
+            AstNode::Command { name, arguments, redirections, span } => {
+                let node_id = self.assign_node_id(node);
+                
+                // 引数を処理
+                for arg in arguments {
+                    let arg_id = self.assign_node_id(arg);
+                    self.add_flow_edge(arg_id, node_id);
+                    self.collect_definitions_and_uses(arg)?;
+                }
+                
+                // リダイレクションを処理
+                for redir in redirections {
+                    let redir_id = self.assign_node_id(redir);
+                    self.add_flow_edge(redir_id, node_id);
+                    self.collect_definitions_and_uses(redir)?;
+                }
+            },
+            
+            AstNode::Pipeline { commands, kind, span } => {
+                let node_id = self.assign_node_id(node);
+                
+                // パイプラインのコマンドを処理（順序が重要）
+                for cmd in commands {
+                    let cmd_id = self.assign_node_id(cmd);
+                    self.add_flow_edge(cmd_id, node_id);
+                    self.collect_definitions_and_uses(cmd)?;
+                }
+            },
+            
+            // 他のノード型も同様に処理
+            // ...
+            
+            _ => {
+                // 子ノードを持つ可能性のある他のノード型を再帰的に処理
+                for child in node.children() {
+                    self.collect_definitions_and_uses(child)?;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// フローエッジを追加
+    fn add_flow_edge(&mut self, from: usize, to: usize) {
+        self.flow_edges.entry(from)
+            .or_insert_with(Vec::new)
+            .push(to);
+    }
+    
+    /// データフローグラフを構築
+    fn build_flow_graph(&mut self) -> Result<()> {
+        // 変数の定義から使用へのエッジを追加
+        for (var_name, def_node) in &self.definitions {
+            let def_id = self.node_id_map[&(Arc::as_ptr(def_node) as usize)];
+            
+            if let Some(uses) = self.uses.get(var_name) {
+                for use_node in uses {
+                    let use_id = self.node_id_map[&(Arc::as_ptr(use_node) as usize)];
+                    self.add_flow_edge(def_id, use_id);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// 到達可能な定義を検索
+    pub fn find_reaching_definitions(&self, node: &AstNode) -> Vec<Arc<AstNode>> {
+        let node_ptr = node as *const AstNode as usize;
+        
+        if let Some(node_id) = self.node_id_map.get(&node_ptr) {
+            let mut result = Vec::new();
+            let mut visited = HashSet::new();
+            self.dfs_reaching_definitions(*node_id, &mut result, &mut visited);
+            result
+        } else {
+            Vec::new()
+        }
+    }
+    
+    /// 到達可能な定義のDFS探索
+    fn dfs_reaching_definitions(&self, node_id: usize, result: &mut Vec<Arc<AstNode>>, visited: &mut HashSet<usize>) {
+        if visited.contains(&node_id) {
+            return;
+        }
+        
+        visited.insert(node_id);
+        
+        // このノードが変数定義なら結果に追加
+        for (var_name, def_node) in &self.definitions {
+            let def_id = self.node_id_map[&(Arc::as_ptr(def_node) as usize)];
+            if def_id == node_id {
+                result.push(def_node.clone());
+                break;
+            }
+        }
+        
+        // 前任者を探索
+        for (pred, succs) in &self.flow_edges {
+            if succs.contains(&node_id) {
+                self.dfs_reaching_definitions(*pred, result, visited);
+            }
+        }
+    }
+    
+    /// 未使用の変数を検出
+    pub fn find_unused_variables(&self) -> Vec<String> {
+        let mut unused = Vec::new();
+        
+        for (var_name, def_node) in &self.definitions {
+            if !self.uses.contains_key(var_name) {
+                // 変数が一度も使用されていない
+                unused.push(var_name.clone());
+            }
+        }
+        
+        unused
+    }
+    
+    /// ライブ変数解析
+    pub fn analyze_live_variables(&self) -> HashMap<usize, HashSet<String>> {
+        let mut live_out = HashMap::new();
+        let mut changed = true;
+        
+        // 初期化
+        for node_id in self.node_id_map.values() {
+            live_out.insert(*node_id, HashSet::new());
+        }
+        
+        // 不動点に達するまで繰り返し
+        while changed {
+            changed = false;
+            
+            for (node_id, _) in &self.node_id_map {
+                let node_id = *node_id;
+                let old_live_out = live_out.get(&node_id).unwrap().clone();
+                
+                // 後続ノードのライブ変数を集める
+                let mut new_live_out = HashSet::new();
+                if let Some(successors) = self.flow_edges.get(&node_id) {
+                    for succ in successors {
+                        let succ_live_in = self.compute_live_in(*succ, &live_out);
+                        new_live_out.extend(succ_live_in);
+                    }
+                }
+                
+                if new_live_out != old_live_out {
+                    live_out.insert(node_id, new_live_out);
+                    changed = true;
+                }
+            }
+        }
+        
+        live_out
+    }
+    
+    /// ノードのライブイン変数を計算
+    fn compute_live_in(&self, node_id: usize, live_out: &HashMap<usize, HashSet<String>>) -> HashSet<String> {
+        let mut live_in = live_out.get(&node_id).cloned().unwrap_or_default();
+        
+        // このノードで定義された変数を削除
+        for (var_name, def_node) in &self.definitions {
+            let def_id = self.node_id_map[&(Arc::as_ptr(def_node) as usize)];
+            if def_id == node_id {
+                live_in.remove(var_name);
+                break;
+            }
+        }
+        
+        // このノードで使用された変数を追加
+        for (var_name, use_nodes) in &self.uses {
+            for use_node in use_nodes {
+                let use_id = self.node_id_map[&(Arc::as_ptr(use_node) as usize)];
+                if use_id == node_id {
+                    live_in.insert(var_name.clone());
+                    break;
+                }
+            }
+        }
+        
+        live_in
+    }
+}
+
+/// 型推論エンジン
+#[derive(Debug)]
+pub struct TypeInferenceEngine {
+    /// シンボルテーブル
+    symbol_table: Arc<RwLock<SymbolTable>>,
+    /// 型制約グラフ
+    constraints: Vec<TypeConstraint>,
+    /// ノードの型マップ (ノードID -> 型)
+    node_types: HashMap<usize, ShellType>,
+    /// ノードIDカウンター
+    node_id_counter: usize,
+    /// ノードIDマップ (AstNode -> ID)
+    node_id_map: HashMap<usize, usize>,
+    /// コマンドの戻り値型マップ
+    command_return_types: HashMap<String, ShellType>,
+    /// 型定義マップ
+    type_definitions: HashMap<String, ShellType>,
+}
+
+/// 型制約
+#[derive(Debug, Clone)]
+pub enum TypeConstraint {
+    /// 2つの型が等しい必要がある
+    Equals(usize, usize),
+    /// 左の型は右の型のサブタイプである必要がある
+    Subtype(usize, usize),
+    /// ノードの型を直接指定
+    Direct(usize, ShellType),
+    /// 型変換が必要
+    Convert(usize, usize, ShellType),
+}
+
+impl TypeInferenceEngine {
+    /// 新しい型推論エンジンを作成
+    pub fn new(symbol_table: Arc<RwLock<SymbolTable>>) -> Self {
+        let mut engine = Self {
+            symbol_table,
+            constraints: Vec::new(),
+            node_types: HashMap::new(),
+            node_id_counter: 0,
+            node_id_map: HashMap::new(),
+            command_return_types: HashMap::new(),
+            type_definitions: HashMap::new(),
+        };
+        
+        // 標準コマンドの戻り値型を登録
+        engine.register_builtin_command_types();
+        
+        engine
+    }
+    
+    /// 組み込みコマンドの型を登録
+    fn register_builtin_command_types(&mut self) {
+        // 一般的なコマンドの戻り値型
+        self.command_return_types.insert("echo".to_string(), ShellType::Integer);
+        self.command_return_types.insert("cd".to_string(), ShellType::Integer);
+        self.command_return_types.insert("ls".to_string(), ShellType::Integer);
+        self.command_return_types.insert("grep".to_string(), ShellType::Integer);
+        self.command_return_types.insert("find".to_string(), ShellType::Integer);
+        
+        // ストリームを返すコマンド
+        self.command_return_types.insert("cat".to_string(), ShellType::Stream(Box::new(ShellType::String)));
+        self.command_return_types.insert("head".to_string(), ShellType::Stream(Box::new(ShellType::String)));
+        self.command_return_types.insert("tail".to_string(), ShellType::Stream(Box::new(ShellType::String)));
+        
+        // 特殊な戻り値型
+        self.command_return_types.insert("date".to_string(), ShellType::DateTime);
+        self.command_return_types.insert("wc".to_string(), ShellType::Array(Box::new(ShellType::Integer)));
+        self.command_return_types.insert("du".to_string(), ShellType::Array(Box::new(ShellType::Integer)));
+    }
+    
+    /// ノードにIDを割り当て
+    fn assign_node_id(&mut self, node: &AstNode) -> usize {
+        let node_ptr = node as *const AstNode as usize;
+        
+        if let Some(id) = self.node_id_map.get(&node_ptr) {
+            return *id;
+        }
+        
+        let id = self.node_id_counter;
+        self.node_id_counter += 1;
+        self.node_id_map.insert(node_ptr, id);
+        id
+    }
+    
+    /// 型推論を実行
+    pub fn infer(&mut self, node: &AstNode) -> Result<()> {
+        // 制約を収集
+        self.collect_constraints(node)?;
+        
+        // 制約を解決
+        self.solve_constraints()?;
+        
+        // 型情報をシンボルテーブルに反映
+        self.update_symbol_table()?;
+        
+        Ok(())
+    }
+    
+    /// 制約を収集
+    fn collect_constraints(&mut self, node: &AstNode) -> Result<usize> {
+        let node_id = self.assign_node_id(node);
+        
+        match node {
+            AstNode::Command { name, arguments, redirections, span } => {
+                // コマンド自体の型
+                self.add_direct_constraint(node_id, ShellType::Command);
+                
+                // 引数の制約を収集
+                let mut arg_ids = Vec::new();
+                for arg in arguments {
+                    let arg_id = self.collect_constraints(arg)?;
+                    arg_ids.push(arg_id);
+                }
+                
+                // コマンドに応じた引数の型チェック
+                if let Some(return_type) = self.command_return_types.get(name) {
+                    // コマンドの戻り値型を設定
+                    self.add_direct_constraint(node_id, return_type.clone());
+                    
+                    // TODO: コマンド固有の引数型チェック
+                }
+                
+                // リダイレクションの制約を収集
+                for redir in redirections {
+                    self.collect_constraints(redir)?;
+                }
+            },
+            
+            AstNode::Argument { value, span } => {
+                // 引数はデフォルトで文字列型
+                self.add_direct_constraint(node_id, ShellType::String);
+                
+                // 数値や真偽値のリテラルの場合は型を推測
+                if let Ok(int_val) = value.parse::<i64>() {
+                    self.add_direct_constraint(node_id, ShellType::Integer);
+                } else if let Ok(float_val) = value.parse::<f64>() {
+                    self.add_direct_constraint(node_id, ShellType::Float);
+                } else if value == "true" || value == "false" {
+                    self.add_direct_constraint(node_id, ShellType::Boolean);
+                } else if value.starts_with('/') || value.contains('/') {
+                    // パスっぽい
+                    self.add_direct_constraint(node_id, ShellType::Path);
+                }
+            },
+            
+            AstNode::VariableAssignment { name, value, export, span } => {
+                // 値の型制約を収集
+                let value_id = self.collect_constraints(value)?;
+                
+                // 変数の型は値の型と等しい
+                self.add_equals_constraint(node_id, value_id);
+            },
+            
+            AstNode::VariableReference { name, default_value, span } => {
+                // 変数の型を参照
+                let symbol_table = self.symbol_table.read().unwrap();
+                if let Some(symbol) = symbol_table.lookup(name) {
+                    if symbol.shell_type != ShellType::Unknown {
+                        self.add_direct_constraint(node_id, symbol.shell_type.clone());
+                    }
+                }
+                
+                // デフォルト値がある場合
+                if let Some(default) = default_value {
+                    let default_id = self.collect_constraints(default)?;
+                    
+                    // デフォルト値の型は変数の型と互換性があるべき
+                    self.add_subtype_constraint(default_id, node_id);
+                }
+            },
+            
+            AstNode::Pipeline { commands, kind, span } => {
+                // パイプラインの最後のコマンドの戻り値型がパイプライン全体の型
+                if !commands.is_empty() {
+                    let last_cmd_id = self.collect_constraints(&commands[commands.len() - 1])?;
+                    self.add_equals_constraint(node_id, last_cmd_id);
+                }
+                
+                // 他のコマンドも処理
+                for cmd in &commands[0..commands.len().saturating_sub(1)] {
+                    self.collect_constraints(cmd)?;
+                }
+            },
+            
+            // 他のノード型についても同様に処理
+            // ...
+            
+            _ => {
+                // 子ノードを持つ可能性のある他のノード型を再帰的に処理
+                for child in node.children() {
+                    self.collect_constraints(child)?;
+                }
+                
+                // デフォルトの型はAny
+                self.add_direct_constraint(node_id, ShellType::Any);
+            }
+        }
+        
+        Ok(node_id)
+    }
+    
+    /// 等価制約を追加
+    fn add_equals_constraint(&mut self, node1_id: usize, node2_id: usize) {
+        self.constraints.push(TypeConstraint::Equals(node1_id, node2_id));
+    }
+    
+    /// サブタイプ制約を追加
+    fn add_subtype_constraint(&mut self, subtype_id: usize, supertype_id: usize) {
+        self.constraints.push(TypeConstraint::Subtype(subtype_id, supertype_id));
+    }
+    
+    /// 直接型制約を追加
+    fn add_direct_constraint(&mut self, node_id: usize, shell_type: ShellType) {
+        self.constraints.push(TypeConstraint::Direct(node_id, shell_type));
+    }
+    
+    /// 変換制約を追加
+    fn add_convert_constraint(&mut self, from_id: usize, to_id: usize, target_type: ShellType) {
+        self.constraints.push(TypeConstraint::Convert(from_id, to_id, target_type));
+    }
+    
+    /// 制約を解決
+    fn solve_constraints(&mut self) -> Result<()> {
+        // 制約処理の最大反復回数
+        const MAX_ITERATIONS: usize = 100;
+        
+        // 各ノードに初期型（Unknown）を割り当て
+        for node_id in self.node_id_map.values() {
+            self.node_types.insert(*node_id, ShellType::Unknown);
+        }
+        
+        // 解決済み制約を記録
+        let mut resolved = HashSet::new();
+        let mut changed = true;
+        let mut iteration = 0;
+        
+        // 制約が解決されなくなるか、最大反復回数に達するまで繰り返す
+        while changed && iteration < MAX_ITERATIONS {
+            changed = false;
+            iteration += 1;
+            
+            for (i, constraint) in self.constraints.iter().enumerate() {
+                if resolved.contains(&i) {
+                    continue;
+                }
+                
+                match constraint {
+                    TypeConstraint::Direct(node_id, shell_type) => {
+                        let current_type = self.node_types.get_mut(node_id).unwrap();
+                        if *current_type == ShellType::Unknown {
+                            *current_type = shell_type.clone();
+                            changed = true;
+                        } else {
+                            // 既存の型と新しい型を統合
+                            let combined_type = current_type.union_with(shell_type);
+                            if *current_type != combined_type {
+                                *current_type = combined_type;
+                                changed = true;
+                            }
+                        }
+                        resolved.insert(i);
+                    },
+                    
+                    TypeConstraint::Equals(node1_id, node2_id) => {
+                        let type1 = self.node_types.get(node1_id).unwrap().clone();
+                        let type2 = self.node_types.get(node2_id).unwrap().clone();
+                        
+                        if type1 == ShellType::Unknown && type2 != ShellType::Unknown {
+                            self.node_types.insert(*node1_id, type2);
+                            changed = true;
+                            resolved.insert(i);
+                        } else if type2 == ShellType::Unknown && type1 != ShellType::Unknown {
+                            self.node_types.insert(*node2_id, type1);
+                            changed = true;
+                            resolved.insert(i);
+                        } else if type1 != ShellType::Unknown && type2 != ShellType::Unknown {
+                            if type1.is_compatible_with(&type2) {
+                                // 両方の型を一般化したものを使用
+                                let generalized = type1.generalize(&type2);
+                                self.node_types.insert(*node1_id, generalized.clone());
+                                self.node_types.insert(*node2_id, generalized);
+                                changed = true;
+                            } else {
+                                return Err(ParserError::SemanticError(
+                                    format!("型の不一致: {} と {}", type1, type2),
+                                    Span::default(), // TODO: 実際のスパンを取得
+                                ));
+                            }
+                            resolved.insert(i);
+                        }
+                    },
+                    
+                    TypeConstraint::Subtype(sub_id, super_id) => {
+                        let subtype = self.node_types.get(sub_id).unwrap().clone();
+                        let supertype = self.node_types.get(super_id).unwrap().clone();
+                        
+                        if subtype != ShellType::Unknown && supertype != ShellType::Unknown {
+                            if !subtype.is_compatible_with(&supertype) {
+                                return Err(ParserError::SemanticError(
+                                    format!("サブタイプ制約違反: {} は {} のサブタイプではありません", subtype, supertype),
+                                    Span::default(), // TODO: 実際のスパンを取得
+                                ));
+                            }
+                            resolved.insert(i);
+                        }
+                    },
+                    
+                    TypeConstraint::Convert(from_id, to_id, target_type) => {
+                        let from_type = self.node_types.get(from_id).unwrap().clone();
+                        
+                        if from_type != ShellType::Unknown {
+                            if !from_type.can_convert_to(target_type) {
+                                return Err(ParserError::SemanticError(
+                                    format!("型変換エラー: {} から {} への変換はサポートされていません", from_type, target_type),
+                                    Span::default(), // TODO: 実際のスパンを取得
+                                ));
+                            }
+                            self.node_types.insert(*to_id, target_type.clone());
+                            changed = true;
+                            resolved.insert(i);
+                        }
+                    },
+                }
+            }
+        }
+        
+        // 未解決の制約が残っているかどうかをチェック
+        let unresolved = self.constraints.len() - resolved.len();
+        if unresolved > 0 {
+            println!("警告: {}個の未解決の型制約が残っています", unresolved);
+        }
+        
+        // 最後のパスで未知の型を具体化
+        for (_, shell_type) in self.node_types.iter_mut() {
+            if *shell_type == ShellType::Unknown {
+                *shell_type = ShellType::Any;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// 型情報をシンボルテーブルに反映
+    fn update_symbol_table(&self) -> Result<()> {
+        let mut symbol_table = self.symbol_table.write().unwrap();
+        
+        for (node_ptr, node_id) in &self.node_id_map {
+            // ノードポインタからAstNodeを逆引き
+            // 注意: これは単純化のためのコード。実際はより安全な方法が必要
+            let node_ptr = *node_ptr as *const AstNode;
+            let node = unsafe { &*node_ptr };
+            
+            if let AstNode::VariableAssignment { name, .. } = node {
+                if let Some(symbol) = symbol_table.lookup_local(name) {
+                    let mut updated_symbol = symbol.clone();
+                    if let Some(shell_type) = self.node_types.get(node_id) {
+                        updated_symbol.shell_type = shell_type.clone();
+                    }
+                    symbol_table.update(updated_symbol);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// ノードの型を取得
+    pub fn get_node_type(&self, node: &AstNode) -> Option<ShellType> {
+        let node_ptr = node as *const AstNode as usize;
+        
+        if let Some(node_id) = self.node_id_map.get(&node_ptr) {
+            self.node_types.get(node_id).cloned()
+        } else {
+            None
+        }
+    }
+}
+
+// ... existing code ...

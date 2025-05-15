@@ -1,280 +1,327 @@
-use anyhow::{Context, Result};
+/**
+ * NexusShell - 次世代インテリジェントシェル
+ * 
+ * 高性能、型付き、モジュラー設計のRust製シェル
+ */
+
+mod ui;
+
+use std::io;
+use std::path::Path;
+use std::sync::Arc;
+use std::env;
+use std::process::exit;
+use anyhow::{Result, Context};
 use clap::{Parser, Subcommand};
-use log::info;
-use std::path::PathBuf;
-use tracing_subscriber::{EnvFilter, FmtSubscriber};
+use tokio::sync::mpsc;
+use log::{debug, info, error, warn};
 
-/// NexusShell - AetherOS向けの次世代シェル
-#[derive(Parser)]
-#[clap(author, version, about, long_about = None)]
+// コアモジュールのインポート
+use nexusshell_executor::Executor;
+use nexusshell_runtime::{Runtime, RuntimeOptions, ShellState, ExecutionResult};
+use ui::NexusTerminal;
+
+/// コマンドライン引数
+#[derive(Parser, Debug)]
+#[clap(
+    name = "NexusShell",
+    version = env!("CARGO_PKG_VERSION"),
+    author = "NexusShell Team",
+    about = "次世代インテリジェントシェル",
+    long_about = "NexusShellは高性能、型付き、モジュラー設計のRust製シェルです"
+)]
 struct Cli {
-    /// 設定ファイルのパス
-    #[clap(short, long, value_parser, value_name = "FILE")]
-    config: Option<PathBuf>,
+    /// 実行するスクリプトファイル
+    #[clap(name = "SCRIPT")]
+    script: Option<String>,
 
-    /// ログレベル
-    #[clap(short, long, value_parser, default_value = "info")]
-    log_level: String,
+    /// スクリプトに渡す引数
+    #[clap(name = "ARGS", trailing_var_arg = true)]
+    args: Vec<String>,
+
+    /// コマンドを直接実行
+    #[clap(short = 'c', long = "command")]
+    command: Option<String>,
+
+    /// 履歴ファイルの場所
+    #[clap(long = "histfile")]
+    histfile: Option<String>,
+
+    /// サンドボックスモードを無効化
+    #[clap(long = "no-sandbox")]
+    no_sandbox: bool,
+
+    /// プラグインを無効化
+    #[clap(long = "no-plugins")]
+    no_plugins: bool,
+
+    /// デバッグモード
+    #[clap(short = 'd', long = "debug")]
+    debug: bool,
+
+    /// 起動時に実行するスクリプト
+    #[clap(short = 'r', long = "rcfile")]
+    rcfile: Option<String>,
 
     /// サブコマンド
     #[clap(subcommand)]
-    command: Option<Commands>,
+    subcmd: Option<SubCommands>,
 }
 
-/// NexusShellのサブコマンド
-#[derive(Subcommand)]
-enum Commands {
-    /// 初期設定ウィザードを起動
-    Setup {
-        /// 設定を上書きする
-        #[clap(short, long)]
-        force: bool,
+/// サブコマンド
+#[derive(Subcommand, Debug)]
+enum SubCommands {
+    /// 構文チェック
+    Check {
+        /// チェックするファイル
+        #[clap(name = "FILE")]
+        file: String,
     },
-    /// スクリプトを実行
-    Run {
-        /// 実行するスクリプトファイル
-        #[clap(value_parser)]
-        script: PathBuf,
+    /// プラグイン管理
+    Plugin {
+        /// プラグイン操作
+        #[clap(subcommand)]
+        action: PluginAction,
     },
-    /// システム情報を表示
-    Info {},
 }
 
-/// NexusShellのアプリケーション構造体
-struct NexusShellApp {
-    cli: Cli,
+/// プラグイン操作
+#[derive(Subcommand, Debug)]
+enum PluginAction {
+    /// プラグインをインストール
+    Install {
+        /// プラグイン名
+        name: String,
+    },
+    /// プラグインを削除
+    Remove {
+        /// プラグイン名
+        name: String,
+    },
+    /// プラグイン一覧を表示
+    List,
 }
 
-impl NexusShellApp {
-    fn new(cli: Cli) -> Self {
-        Self { cli }
-    }
-
-    /// アプリケーションを実行
-    fn run(&self) -> Result<()> {
-        // ログレベルの設定
-        if let Some(log_level) = &self.cli.log_level {
-            let filter = EnvFilter::try_new(log_level)
-                .context("無効なログレベルが指定されました")?;
-            let subscriber = FmtSubscriber::builder()
-                .with_env_filter(filter)
-                .finish();
-            tracing::subscriber::set_global_default(subscriber)
-                .context("ロガーの初期化に失敗しました")?;
-        }
-
-        // 設定ファイルの読み込み
-        let config_path = self.cli.config.clone().unwrap_or_else(|| {
-            let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("./config"));
-            path.push("nexusshell");
-            path.push("config.toml");
-            path
-        });
-        
-        info!("設定ファイルを読み込みます: {:?}", config_path);
-        
-        // サブコマンドに応じて処理を分岐
-        match &self.cli.command {
-            Some(Commands::Setup { force }) => {
-                info!("セットアップを開始します (force: {})", force);
-                self.run_setup_wizard(*force)?;
-                Ok(())
-            }
-            Some(Commands::Run { script }) => {
-                info!("スクリプトを実行します: {:?}", script);
-                self.execute_script(script)?;
-                Ok(())
-            }
-            Some(Commands::Info {}) => {
-                info!("システム情報を表示します");
-                self.show_system_info()?;
-                Ok(())
-            }
-            None => {
-                // 対話モードで起動
-                self.start_interactive_mode()?;
-                Ok(())
-            }
-        }
-    }
+#[tokio::main]
+async fn main() -> Result<()> {
+    // ロギングの初期化
+    env_logger::init();
+    info!("NexusShell を起動しています...");
     
-    /// セットアップウィザードを実行
-    fn run_setup_wizard(&self, force: bool) -> Result<()> {
-        // 既存の設定ファイルの確認
-        let config_path = self.cli.config.clone().unwrap_or_else(|| {
-            let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("./config"));
-            path.push("nexusshell");
-            path.push("config.toml");
-            path
-        });
-        
-        if config_path.exists() && !force {
-            println!("設定ファイルが既に存在します: {:?}", config_path);
-            println!("上書きするには --force オプションを使用してください");
-            return Ok(());
-        }
-        
-        // 設定ディレクトリの作成
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)
-                .context("設定ディレクトリの作成に失敗しました")?;
-        }
-        
-        println!("=== NexusShell セットアップウィザード ===");
-        
-        // 基本設定の取得
-        let mut default_shell = String::new();
-        println!("デフォルトシェルを選択してください (bash/zsh/powershell):");
-        std::io::stdin().read_line(&mut default_shell)
-            .context("入力の読み取りに失敗しました")?;
-        let default_shell = default_shell.trim();
-        
-        let mut theme = String::new();
-        println!("テーマを選択してください (dark/light/system):");
-        std::io::stdin().read_line(&mut theme)
-            .context("入力の読み取りに失敗しました")?;
-        let theme = theme.trim();
-        
-        // 設定ファイルの作成
-        let config = format!(
-            r#"# NexusShell 設定ファイル
-[general]
-default_shell = "{}"
-theme = "{}"
-enable_ai_features = true
-
-[performance]
-job_threads = 4
-enable_jit = true
-
-[security]
-sandbox_scripts = true
-encrypt_history = false
-
-[compatibility]
-posix_compliance = "strict"
-bash_compatibility = true
-zsh_compatibility = true
-"#, 
-            default_shell, theme
-        );
-        
-        std::fs::write(&config_path, config)
-            .context("設定ファイルの書き込みに失敗しました")?;
-        
-        println!("設定ファイルを作成しました: {:?}", config_path);
-        println!("セットアップが完了しました！");
-        
-        Ok(())
-    }
-    
-    /// スクリプトを実行
-    fn execute_script(&self, script_path: &PathBuf) -> Result<()> {
-        // スクリプトファイルの存在確認
-        if !script_path.exists() {
-            return Err(anyhow::anyhow!("スクリプトファイルが見つかりません: {:?}", script_path));
-        }
-        
-        // スクリプトの内容を読み込み
-        let script_content = std::fs::read_to_string(script_path)
-            .context("スクリプトファイルの読み込みに失敗しました")?;
-        
-        // スクリプトエンジンの初期化
-        info!("スクリプトエンジンを初期化しています");
-        
-        // スクリプトの解析
-        info!("スクリプトを解析しています");
-        
-        // 実行環境のセットアップ
-        let env_vars = std::env::vars().collect::<std::collections::HashMap<_, _>>();
-        
-        // スクリプトの実行
-        info!("スクリプトを実行しています");
-        
-        // 簡易的なスクリプト実行（実際にはもっと複雑な実装が必要）
-        for line in script_content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with("#") {
-                continue;
-            }
-            
-            // コマンドの実行（簡易版）
-            println!("実行: {}", line);
-            
-            // 実際にはここでコマンドを解析して実行する
-            if line.starts_with("echo ") {
-                println!("{}", &line[5..]);
-            } else if line == "date" {
-                let now = chrono::Local::now();
-                println!("{}", now.format("%Y-%m-%d %H:%M:%S"));
-            } else if line == "pwd" {
-                println!("{:?}", std::env::current_dir()?);
-            } else {
-                println!("未実装のコマンド: {}", line);
-            }
-        }
-        
-        info!("スクリプトの実行が完了しました");
-        Ok(())
-    }
-
-    /// 対話モードを開始
-    fn start_interactive_mode(&self) -> Result<()> {
-        info!("対話モードを開始します");
-        // TODO: 対話型シェルの実装
-        println!("NexusShell v{} 対話モード (開発中)", env!("CARGO_PKG_VERSION"));
-        println!("'exit'と入力して終了します。");
-
-        let mut input = String::new();
-        
-        loop {
-            print!("nexus> ");
-            std::io::Write::flush(&mut std::io::stdout())
-                .context("出力のフラッシュに失敗しました")?;
-                
-            input.clear();
-            std::io::stdin()
-                .read_line(&mut input)
-                .context("入力の読み取りに失敗しました")?;
-                
-            let input = input.trim();
-            
-            if input == "exit" {
-                println!("さようなら！");
-                break;
-            }
-            
-            println!("入力: {}", input);
-        }
-        
-        Ok(())
-    }
-
-    /// システム情報を表示
-    fn show_system_info(&self) -> Result<()> {
-        println!("=== NexusShell システム情報 ===");
-        println!("バージョン: {}", env!("CARGO_PKG_VERSION"));
-        println!("OS: {}", std::env::consts::OS);
-        println!("アーキテクチャ: {}", std::env::consts::ARCH);
-        println!("=============================");
-        Ok(())
-    }
-}
-
-fn main() -> Result<()> {
-    // ロガーのセットアップ
-    let subscriber = FmtSubscriber::builder()
-        .with_env_filter(EnvFilter::from_default_env())
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .context("ロガーの初期化に失敗しました")?;
-
-    // コマンドライン引数のパース
+    // コマンドライン引数の解析
     let cli = Cli::parse();
     
-    // アプリケーションの作成と実行
-    let app = NexusShellApp::new(cli);
-    app.run()?;
+    // ランタイムオプションの設定
+    let options = RuntimeOptions {
+        sandbox_mode: !cli.no_sandbox,
+        enable_plugins: !cli.no_plugins,
+        debug_mode: cli.debug,
+        ..Default::default()
+    };
     
+    // ランタイムとエグゼキュータの初期化
+    let runtime = match Runtime::with_options(options) {
+        Ok(rt) => Arc::new(rt),
+        Err(e) => {
+            error!("ランタイムの初期化に失敗しました: {}", e);
+            return Err(anyhow::anyhow!("ランタイムの初期化に失敗しました: {}", e));
+        }
+    };
+    
+    let executor = Arc::new(Executor::new());
+    
+    // RC ファイルの実行
+    let rcfile = cli.rcfile.unwrap_or_else(|| {
+        let home = dirs::home_dir().unwrap_or_default();
+        home.join(".nexusshellrc").to_string_lossy().to_string()
+    });
+    
+    if Path::new(&rcfile).exists() {
+        info!("RCファイルを実行中: {}", rcfile);
+        match runtime.execute_script(Path::new(&rcfile)).await {
+            Ok(_) => {},
+            Err(e) => warn!("RCファイルの実行中にエラーが発生しました: {}", e),
+        }
+    }
+    
+    // サブコマンド処理
+    if let Some(subcmd) = cli.subcmd {
+        match subcmd {
+            SubCommands::Check { file } => {
+                return check_syntax(&file, &runtime).await;
+            },
+            SubCommands::Plugin { action } => {
+                return handle_plugin_action(action, &runtime).await;
+            },
+        }
+    }
+    
+    // コマンド実行モード
+    if let Some(cmd) = cli.command {
+        return execute_command(&cmd, &runtime).await;
+    }
+    
+    // スクリプト実行モード
+    if let Some(script) = cli.script {
+        return execute_script(&script, &cli.args, &runtime).await;
+    }
+    
+    // インタラクティブモード
+    run_interactive(runtime, executor).await
+}
+
+/// 構文チェック
+async fn check_syntax(file: &str, runtime: &Arc<Runtime>) -> Result<()> {
+    info!("構文チェック: {}", file);
+    
+    let path = Path::new(file);
+    if !path.exists() {
+        error!("ファイルが存在しません: {}", file);
+        return Err(anyhow::anyhow!("ファイルが存在しません: {}", file));
+    }
+    
+    match runtime.get_evaluation_engine().check_syntax_file(path).await {
+        Ok(issues) => {
+            if issues.is_empty() {
+                println!("構文チェックに成功しました: {}", file);
+                Ok(())
+            } else {
+                for issue in &issues {
+                    println!("{}: {}", issue.level, issue.message);
+                    if let Some(line) = issue.line {
+                        println!("  行 {}", line);
+                    }
+                }
+                Err(anyhow::anyhow!("構文エラーが見つかりました: {} 件", issues.len()))
+            }
+        },
+        Err(e) => {
+            error!("構文チェック中にエラーが発生しました: {}", e);
+            Err(anyhow::anyhow!("構文チェック中にエラーが発生しました: {}", e))
+        }
+    }
+}
+
+/// プラグイン操作処理
+async fn handle_plugin_action(action: PluginAction, runtime: &Arc<Runtime>) -> Result<()> {
+    let plugin_manager = runtime.get_plugin_manager();
+    
+    match action {
+        PluginAction::Install { name } => {
+            info!("プラグインをインストール中: {}", name);
+            plugin_manager.install(&name).await?;
+            println!("プラグイン '{}' をインストールしました", name);
+        },
+        PluginAction::Remove { name } => {
+            info!("プラグインを削除中: {}", name);
+            plugin_manager.uninstall(&name).await?;
+            println!("プラグイン '{}' を削除しました", name);
+        },
+        PluginAction::List => {
+            let plugins = plugin_manager.list_plugins().await?;
+            println!("インストール済みプラグイン:");
+            for plugin in plugins {
+                println!("- {} (v{}) - {}", 
+                         plugin.name, 
+                         plugin.version, 
+                         plugin.description.unwrap_or_default());
+            }
+        },
+    }
+    
+    Ok(())
+}
+
+/// コマンド実行モード
+async fn execute_command(cmd: &str, runtime: &Arc<Runtime>) -> Result<()> {
+    info!("コマンド実行モード: {}", cmd);
+    
+    match runtime.execute_command(cmd).await {
+        Ok(result) => {
+            if !result.success {
+                exit(result.exit_code.unwrap_or(1));
+            }
+            Ok(())
+        },
+        Err(e) => {
+            error!("コマンド実行エラー: {}", e);
+            exit(1);
+        }
+    }
+}
+
+/// スクリプト実行モード
+async fn execute_script(script: &str, args: &[String], runtime: &Arc<Runtime>) -> Result<()> {
+    info!("スクリプト実行モード: {}", script);
+    
+    // スクリプト引数を環境にセット
+    let env = runtime.get_environment();
+    env.set("NEXUS_SCRIPT", script).await?;
+    
+    for (i, arg) in args.iter().enumerate() {
+        env.set(&format!("NEXUS_ARG{}", i), arg).await?;
+    }
+    env.set("NEXUS_ARGC", &args.len().to_string()).await?;
+    
+    // スクリプト実行
+    match runtime.execute_script(Path::new(script)).await {
+        Ok(result) => {
+            if !result.success {
+                exit(result.exit_code.unwrap_or(1));
+            }
+            Ok(())
+        },
+        Err(e) => {
+            error!("スクリプト実行エラー: {}", e);
+            exit(1);
+        }
+    }
+}
+
+/// インタラクティブモードを実行
+async fn run_interactive(runtime: Arc<Runtime>, executor: Arc<Executor>) -> Result<()> {
+    info!("インタラクティブモードを開始します");
+    
+    // 実行結果チャンネル
+    let (tx, mut rx) = mpsc::channel::<ExecutionResult>(100);
+    
+    // ターミナルUIの初期化
+    let mut terminal = match NexusTerminal::new() {
+        Ok(term) => term,
+        Err(e) => {
+            error!("ターミナルの初期化に失敗しました: {}", e);
+            return Err(anyhow::anyhow!("ターミナルの初期化に失敗しました: {}", e));
+        }
+    };
+    
+    // ランタイムとエグゼキュータをUIに登録
+    terminal.register_runtime(runtime.clone());
+    terminal.register_executor(executor.clone());
+    terminal.register_result_channel(tx);
+    
+    // 受信リスナーを起動
+    let result_handler = tokio::spawn(async move {
+        while let Some(result) = rx.recv().await {
+            debug!("コマンド実行結果: exit_code={:?}, success={}", 
+                   result.exit_code, result.success);
+            
+            // ここで結果に応じた処理（シェル状態の更新など）
+            let mut state = runtime.get_shell_state().await;
+            if let Some(code) = result.exit_code {
+                state.last_status = code;
+            }
+            if let Err(e) = runtime.set_shell_state(state).await {
+                error!("シェル状態の更新に失敗しました: {}", e);
+            }
+        }
+    });
+    
+    // UIのメインループを実行
+    terminal.run()?;
+    
+    // リスナーを終了
+    result_handler.abort();
+    
+    info!("インタラクティブモードを終了します");
     Ok(())
 }

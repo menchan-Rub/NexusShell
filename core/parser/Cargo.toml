@@ -1,7 +1,23 @@
 [package]
-name = "parser"
+name = "nexus-shell-parser"
 version = "0.1.0"
 edition = "2021"
+authors = ["NexusShell Team <info@nexusshell.com>"]
+description = "高度な構文解析エンジンを持つ次世代シェル"
+readme = "README.md"
+repository = "https://github.com/nexusshell/nexusshell"
+license = "MIT OR Apache-2.0"
+homepage = "https://nexusshell.com"
+categories = ["command-line-utilities", "development-tools::build-utils"]
+keywords = ["shell", "parser", "terminal", "command-line"]
+
+[lib]
+name = "nexus_shell_parser"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nexus-shell"
+path = "../../src/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -38,12 +54,77 @@ dirs = "5.0"
 rand = "0.8"
 hostname = "0.3"
 
+# 新規追加依存
+uuid = { version = "1.3", features = ["v4", "fast-rng"] }
+chrono = "0.4"
+crossbeam = "0.8"
+parking_lot = "0.12"
+rayon = "1.7"
+# プラグイン機能用
+libloading = "0.8"
+wasmtime = { version = "10.0", optional = true }
+
+# エラー回復と型システム用の追加依存
+fnv = "1.0" # 高速ハッシュマップ
+smallvec = "1.10" # スタックアロケーションの小さなベクトル
+bit-set = "0.5" # ビットセット
+bit-vec = "0.6" # ビットベクトル
+downcast = "0.11" # トレイトオブジェクトのダウンキャスト
+fragile = "2.0" # スレッド間の安全なデータ共有
+zerocopy = "0.6" # ゼロコピーのデシリアライズ
+unarray = "0.1" # 配列操作ユーティリティ
+either = "1.8" # 2つの異なる型のいずれかを保持する
+beef = "0.5" # 効率的な文字列型
+
+[features]
+default = []
+metrics = []
+plugins = []
+wasm_plugins = ["wasmtime"]
+error_recovery = [] # エラー回復機能を有効化
+strict_typing = [] # 厳格な型チェックを有効化
+
 [dev-dependencies]
 criterion = "0.5"
 proptest = "1.1"
 test-case = "3.1"
 mockall = "0.11"
 
-[[bench]]
-name = "parser_benchmark"
-harness = false
+# [[bench]]
+# name = "parser_benchmark"
+# harness = false
+
+[package.metadata.deb]
+maintainer = "NexusShell Team <info@nexusshell.com>"
+copyright = "2024, NexusShell Team <info@nexusshell.com>"
+license-file = ["../../LICENSE", "0"]
+extended-description = """
+NexusShellは次世代のインテリジェントシェルです。
+優れた構文解析、型チェック、エラー回復機能を備え、
+最新のターミナルエクスペリエンスを提供します。
+"""
+depends = "$auto"
+section = "utility"
+priority = "optional"
+assets = [
+    ["../../target/release/nexus-shell", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/nexus-shell/README", "644"],
+]
+
+[package.metadata.rpm]
+package = "nexus-shell"
+license = "MIT OR Apache-2.0"
+requires = ["libc"]
+
+[package.metadata.rpm.cargo]
+buildflags = ["--release"]
+
+[package.metadata.rpm.targets]
+nexus-shell = { path = "/usr/bin/nexus-shell" }
+
+[package.metadata.windows]
+subsystem = "windows"
+min_windows_version = "10.0"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
