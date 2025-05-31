@@ -85,56 +85,26 @@ impl BuiltinCommand for WcCommand {
 
         // ファイルが指定されていない場合は標準入力から読み込む
         if files.is_empty() {
-            if !context.stdin_connected {
-                return Ok(CommandResult::failure(1)
-                    .with_stderr("エラー: 標準入力が接続されていません".into_bytes()));
-            }
-            
-            // 標準入力の処理はスタブとして残す
-            // 本来は stdin から読み込むべきだが、このコードでは空文字列を返す
-            let content = String::new();
-            let counts = count_text(&content, count_lines, count_words, count_bytes, count_chars);
-            
-            let output = format_counts(counts, count_lines, count_words, count_bytes, count_chars, None);
-            result.stdout.extend_from_slice(output.as_bytes());
+            let stdin = io::stdin();
+            let mut handle = stdin.lock();
+            let mut buffer = String::new();
+            let bytes = handle.read_to_string(&mut buffer)?;
+            total_bytes += bytes;
+            total_lines += buffer.lines().count();
+            total_words += buffer.split_whitespace().count();
+            total_chars += buffer.chars().count();
+            // 結果出力
+            print_wc_result(total_lines, total_words, total_bytes, total_chars, "");
         } else {
-            // 各ファイルを処理
-            for file_path in &files {
-                let path = context.current_dir.join(file_path);
-                
-                match count_file(&path, count_lines, count_words, count_bytes, count_chars) {
-                    Ok(counts) => {
-                        // 集計に加算
-                        if count_lines {
-                            total_lines += counts.0;
-                        }
-                        if count_words {
-                            total_words += counts.1;
-                        }
-                        if count_bytes {
-                            total_bytes += counts.2;
-                        }
-                        if count_chars {
-                            total_chars += counts.3;
-                        }
-                        
-                        // 出力を生成
-                        let output = format_counts(counts, count_lines, count_words, count_bytes, count_chars, Some(file_path));
-                        result.stdout.extend_from_slice(output.as_bytes());
-                    },
-                    Err(err) => {
-                        let err_msg = format!("エラー: {}: {}\n", file_path, err);
-                        result.stderr.extend_from_slice(err_msg.as_bytes());
-                        result.exit_code = 1;
-                    }
-                }
-            }
-            
-            // 複数ファイルの場合は合計を表示
-            if files.len() > 1 {
-                let total_counts = (total_lines, total_words, total_bytes, total_chars);
-                let output = format_counts(total_counts, count_lines, count_words, count_bytes, count_chars, Some("合計"));
-                result.stdout.extend_from_slice(output.as_bytes());
+            for file in files {
+                let mut f = std::fs::File::open(file)?;
+                let mut buffer = String::new();
+                let bytes = f.read_to_string(&mut buffer)?;
+                total_bytes += bytes;
+                total_lines += buffer.lines().count();
+                total_words += buffer.split_whitespace().count();
+                total_chars += buffer.chars().count();
+                print_wc_result(total_lines, total_words, total_bytes, total_chars, file);
             }
         }
 
@@ -156,7 +126,9 @@ fn count_file(
     
     // バイト数のみの場合は、実際にファイルを読み込まずにメタデータから取得
     if count_bytes && !count_lines && !count_words && !count_chars {
-        return Ok((0, 0, file_size, 0));
+        let metadata = std::fs::metadata(path)?;
+        let byte_count = metadata.len();
+        return Ok((0, 0, byte_count as usize, 0));
     }
     
     let mut bytes = 0;

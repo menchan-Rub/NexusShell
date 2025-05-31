@@ -5,7 +5,9 @@ use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use tracing::{debug, warn, error};
+use tracing::{debug, warn, error, info};
+use nix::unistd::{chown, Uid, Gid};
+use users::{get_user_by_name, get_group_by_name};
 
 /// ファイル検索コマンド
 ///
@@ -488,7 +490,42 @@ fn matches_criterion(path: &Path, criterion: &FindCriterion) -> Result<bool> {
             }
             Ok(false)
         },
-        // 他の条件は簡略化のため省略
+        FindCriterion::User(user) => {
+            #[cfg(unix)]
+            {
+                let meta = fs::metadata(path)?;
+                if let Some(u) = get_user_by_name(user) {
+                    Ok(meta.uid() == u.uid())
+                } else {
+                    Ok(false)
+                }
+            }
+            #[cfg(not(unix))]
+            { Ok(false) }
+        },
+        FindCriterion::Group(group) => {
+            #[cfg(unix)]
+            {
+                let meta = fs::metadata(path)?;
+                if let Some(g) = get_group_by_name(group) {
+                    Ok(meta.gid() == g.gid())
+                } else {
+                    Ok(false)
+                }
+            }
+            #[cfg(not(unix))]
+            { Ok(false) }
+        },
+        FindCriterion::Permission(perm) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let meta = fs::metadata(path)?;
+                Ok(meta.permissions().mode() & 0o777 == *perm)
+            }
+            #[cfg(not(unix))]
+            { Ok(false) }
+        },
         _ => Ok(false),
     }
 }
@@ -505,11 +542,37 @@ fn execute_action(path: &Path, action: &Action, output: &mut Vec<u8>) -> Result<
             let path_str = path.to_string_lossy();
             let cmd = command.replace("{}", &path_str);
             
-            // 実際の実装では、コマンドを実行するコードを追加
+            // コマンドを実行
             debug!("実行: {}", cmd);
             
-            // ここでは代わりに実行されるコマンドを出力に追加
-            output.extend_from_slice(format!("would execute: {}\n", cmd).as_bytes());
+            // コマンドの構成要素に分解
+            let parts: Vec<&str> = cmd.split_whitespace().collect();
+            if parts.is_empty() {
+                return Err(anyhow!("空のコマンドを実行できません"));
+            }
+            
+            // プロセスを生成
+            let output = std::process::Command::new(parts[0])
+                .args(&parts[1..])
+                .output()
+                .map_err(|e| anyhow!("コマンド '{}' の実行に失敗: {}", cmd, e))?;
+            
+            // 標準出力を追加
+            if !output.stdout.is_empty() {
+                output.extend_from_slice(&output.stdout);
+            }
+            
+            // エラー出力があれば追加
+            if !output.stderr.is_empty() {
+                output.extend_from_slice(&output.stderr);
+            }
+            
+            // 終了ステータスを確認
+            if !output.status.success() {
+                let code = output.status.code().unwrap_or(-1);
+                return Err(anyhow!("コマンド '{}' が非ゼロ終了コード {} で終了しました", cmd, code));
+            }
+            
             Ok(())
         },
         Action::Delete => {
@@ -523,20 +586,99 @@ fn execute_action(path: &Path, action: &Action, output: &mut Vec<u8>) -> Result<
         },
         Action::Chmod(mode) => {
             debug!("権限変更: {} -> {:o}", path.display(), mode);
-            // 実際の実装では、ファイルの権限を変更するコードを追加
-            // std::os::unix::fs::PermissionsExt::from_mode(*mode) などを使用
             
-            // ここでは代わりに実行される操作を出力に追加
-            output.extend_from_slice(format!("would chmod {:o} {}\n", mode, path.display()).as_bytes());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                
+                // Unixプラットフォームでの権限変更
+                let permissions = fs::Permissions::from_mode(*mode);
+                fs::set_permissions(path, permissions)
+                    .map_err(|e| anyhow!("'{}' の権限変更に失敗: {}", path.display(), e))?;
+            }
+            
+            #[cfg(not(unix))]
+            {
+                // Windows等の非Unixプラットフォームでは読み書き権限のみ設定
+                let mut permissions = fs::metadata(path)?.permissions();
+                permissions.set_readonly(*mode & 0o200 == 0); // 書き込み不可の場合、読み取り専用に
+                fs::set_permissions(path, permissions)
+                    .map_err(|e| anyhow!("'{}' の権限変更に失敗: {}", path.display(), e))?;
+                
+                // フルモードが設定できないことを出力に記録
+                output.extend_from_slice(format!("警告: 非Unixプラットフォームでは完全な権限モード {:o} の設定はサポートされていません\n", mode).as_bytes());
+            }
+            
             Ok(())
         },
         Action::Chown(user) => {
-            debug!("所有者変更: {} -> {}", path.display(), user);
-            // 実際の実装では、ファイルの所有者を変更するコードを追加
-            
-            // ここでは代わりに実行される操作を出力に追加
-            output.extend_from_slice(format!("would chown {} {}\n", user, path.display()).as_bytes());
-            Ok(())
+            debug!("所有者変更試行: {} -> {}", path.display(), user);
+
+            #[cfg(unix)]
+            {
+                use nix::unistd::{chown, Uid, Gid};
+                use users::{get_user_by_name, get_group_by_name};
+                // use std::os::unix::fs::MetadataExt; // 既存のUID/GIDを維持する場合に必要
+
+                let parts: Vec<&str> = user.splitn(2, ':').collect();
+                let user_spec = parts.get(0).copied().filter(|s| !s.is_empty());
+                let group_spec = parts.get(1).copied().filter(|s| !s.is_empty());
+
+                let target_uid: Option<Uid> = match user_spec {
+                    Some(name) => {
+                        if let Ok(uid_val) = name.parse::<u32>() {
+                            Some(Uid::from_raw(uid_val))
+                        } else if let Some(u) = get_user_by_name(name) {
+                            Some(Uid::from_raw(u.uid()))
+                        } else {
+                            error!("chown: ユーザー '{} ' が見つかりません。", name);
+                            // エラーを伝播させるためにここでリターン
+                            // return Err(anyhow!("ユーザー '{} ' が見つかりません。", name));
+                            // アクションの失敗は find 全体の失敗とせず、警告に留める場合もある
+                            // 今回は find 全体は続行し、個々の chown の失敗としてログ出力
+                            output.extend_from_slice(format!("find: '{}': ユーザー '{} ' が見つかりません。\n", path.display(), name).as_bytes());
+                            return Ok(()); // このファイルに対するアクションは失敗したが、検索は続ける
+                        }
+                    }
+                    None => None, // ユーザー指定なし
+                };
+
+                let target_gid: Option<Gid> = match group_spec {
+                    Some(name) => {
+                        if let Ok(gid_val) = name.parse::<u32>() {
+                            Some(Gid::from_raw(gid_val))
+                        } else if let Some(g) = get_group_by_name(name) {
+                            Some(Gid::from_raw(g.gid()))
+                        } else {
+                            error!("chown: グループ '{} ' が見つかりません。", name);
+                            output.extend_from_slice(format!("find: '{}': グループ '{} ' が見つかりません。\n", path.display(), name).as_bytes());
+                            return Ok(());
+                        }
+                    }
+                    None => None, // グループ指定なし
+                };
+
+                if target_uid.is_none() && target_gid.is_none() {
+                    warn!("chown: '{}': ユーザーもグループも指定されていません。変更はありません。", path.display());
+                    output.extend_from_slice(format!("find: '{}': ユーザーもグループも指定されていません。\n", path.display()).as_bytes());
+                } else {
+                    debug!("chown {} を実行: UID={:?}, GID={:?}", path.display(), target_uid, target_gid);
+                    if let Err(e) = chown(path, target_uid, target_gid) {
+                        error!("chown 失敗 '{}': {}", path.display(), e);
+                        output.extend_from_slice(format!("find: '{}': chown失敗: {}\n", path.display(), e).as_bytes());
+                        // return Err(anyhow!("chown 失敗 '{}': {}", path.display(), e));
+                    } else {
+                        info!("{} の所有者を {:?}:{:?} に変更しました。", path.display(), target_uid, target_gid);
+                        // 成功時は標準出力には何も出さないのが一般的
+                    }
+                }
+            }
+
+            #[cfg(windows)]
+            {
+                warn!("Windows環境でのchownアクション ({}) は現在サポートされていません。", path.display());
+                output.extend_from_slice(format!("find: '{}': Windowsではchownはサポートされていません。\n", path.display()).as_bytes());
+            }
         },
     }
 }
@@ -727,5 +869,26 @@ fn parse_time_comparison(time_str: &str) -> Result<TimeComparison> {
         TimeComparison::Less => Ok(TimeComparison::Less(duration)),
         TimeComparison::Greater => Ok(TimeComparison::Greater(duration)),
         _ => unreachable!(),
+    }
+}
+
+// Unix環境でユーザー名からUIDを取得する関数
+#[cfg(unix)]
+fn get_user_uid(username: &str) -> Option<uid_t> {
+    use std::ffi::CString;
+    use libc::{passwd, getpwnam, uid_t};
+    
+    let c_name = match CString::new(username) {
+        Ok(name) => name,
+        Err(_) => return None,
+    };
+    
+    unsafe {
+        let pwd = getpwnam(c_name.as_ptr());
+        if pwd.is_null() {
+            None
+        } else {
+            Some((*pwd).pw_uid)
+        }
     }
 } 

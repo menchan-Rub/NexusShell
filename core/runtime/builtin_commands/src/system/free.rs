@@ -199,18 +199,93 @@ fn get_memory_info() -> MemoryInfo {
     let free = system.free_memory();
     let available = system.available_memory();
     
-    // キャッシュとバッファ情報はLinuxではsysinfoから取得可能だが
-    // クロスプラットフォームの場合は近似値または0を設定
-    // 実際の実装では、OSに応じて適切な方法で取得することが望ましい
+    // OSに応じて適切な方法でキャッシュされたメモリ量を取得
     let cached = if cfg!(target_os = "linux") { 
-        // Linuxの場合は/proc/meminfoから取得することも可能
-        // ここでは簡略化のため近似値を計算
-        available.saturating_sub(free)
+        // Linuxの場合はprocファイルシステムから情報を取得
+        match std::fs::read_to_string("/proc/meminfo") {
+            Ok(meminfo) => {
+                // 各種キャッシュメモリの情報を取得
+                let mut cached_kb = 0;
+                
+                for line in meminfo.lines() {
+                    if line.starts_with("Cached:") {
+                        if let Some(value) = parse_meminfo_line(line) {
+                            cached_kb += value;
+                        }
+                    } else if line.starts_with("Buffers:") {
+                        if let Some(value) = parse_meminfo_line(line) {
+                            cached_kb += value;
+                        }
+                    } else if line.starts_with("SReclaimable:") {
+                        if let Some(value) = parse_meminfo_line(line) {
+                            cached_kb += value;
+                        }
+                    }
+                }
+                
+                // KBからMBに変換
+                cached_kb / 1024
+            }
+            Err(_) => 0,
+        }
+    } else if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
+        // macOSの場合はsysctlを使用
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            use std::process::Command;
+            
+            // vm_stats コマンドを実行して結果を取得
+            let output = Command::new("vm_stat")
+                .output()
+                .ok();
+                
+            if let Some(output) = output {
+                if let Ok(output_str) = String::from_utf8(output.stdout) {
+                    // ページサイズを取得（通常4KB）
+                    let page_size = 4096;
+                    
+                    // 各種キャッシュメモリの情報を取得
+                    let mut cached_pages = 0;
+                    
+                    for line in output_str.lines() {
+                        if line.contains("Pages inactive:") || 
+                           line.contains("Pages purgeable:") {
+                            if let Some(value) = parse_vm_stat_line(line) {
+                                cached_pages += value;
+                            }
+                        }
+                    }
+                    
+                    // ページ数をMBに変換
+                    return (cached_pages as u64 * page_size as u64) / (1024 * 1024);
+                }
+            }
+            0
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        0
+    } else if cfg!(target_os = "windows") {
+        // Windowsの場合はPerfomance Counterを使用
+        #[cfg(target_os = "windows")]
+        {
+            use std::mem::MaybeUninit;
+            use windows_sys::Win32::System::Performance::{GetPerformanceInfo, PERFORMANCE_INFORMATION};
+            let mut perf_info = MaybeUninit::<PERFORMANCE_INFORMATION>::uninit();
+            let ok = unsafe { GetPerformanceInfo(perf_info.as_mut_ptr(), std::mem::size_of::<PERFORMANCE_INFORMATION>() as u32) };
+            if ok == 0 {
+                return 0;
+            }
+            let perf_info = unsafe { perf_info.assume_init() };
+            perf_info.SystemCache as u64 * perf_info.PageSize as u64
+        }
+        #[cfg(not(target_os = "windows"))]
+        0
     } else {
+        // その他のOSの場合は0を返す
         0
     };
     
-    let buffers = 0; // バッファの情報は簡略化のため0とする
+    let buffers = get_system_buffers()?;
     
     // Swap情報
     let swap_total = system.total_swap();
@@ -382,15 +457,78 @@ fn format_memory_info(info: &MemoryInfo, options: &FreeOptions) -> String {
     result
 }
 
-#[cfg(target_os = "macos")]
-fn parse_vm_stat_line(line: &str) -> u64 {
+/// /proc/meminfo の行からメモリ値（KB単位）を解析する
+fn parse_meminfo_line(line: &str) -> Option<u64> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() >= 2 {
-        parts[1]
-            .trim_end_matches('.')
-            .parse::<u64>()
-            .unwrap_or(0)
-    } else {
-        0
+        let value_str = parts[1];
+        if let Ok(value) = value_str.parse::<u64>() {
+            return Some(value);
+        }
     }
+    None
+}
+
+/// vm_stat の行からページ数を解析する
+fn parse_vm_stat_line(line: &str) -> Option<u64> {
+    let parts: Vec<&str> = line.split(':').collect();
+    if parts.len() >= 2 {
+        let value_str = parts[1].trim().trim_end_matches('.');
+        if let Ok(value) = value_str.parse::<u64>() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+// OSごとのバッファ取得関数
+#[cfg(target_os = "linux")]
+fn get_system_buffers() -> Result<u64, FreeError> {
+    // /proc/meminfoからBuffersを取得
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    let file = File::open("/proc/meminfo")?;
+    for line in BufReader::new(file).lines() {
+        let l = line?;
+        if l.starts_with("Buffers:") {
+            let parts: Vec<&str> = l.split_whitespace().collect();
+            if parts.len() >= 2 {
+                return Ok(parts[1].parse::<u64>().unwrap_or(0) * 1024);
+            }
+        }
+    }
+    Ok(0)
+}
+#[cfg(target_os = "windows")]
+fn get_system_buffers() -> Result<u64, FreeError> {
+    use std::mem::MaybeUninit;
+    use windows_sys::Win32::System::Performance::{GetPerformanceInfo, PERFORMANCE_INFORMATION};
+    let mut perf_info = MaybeUninit::<PERFORMANCE_INFORMATION>::uninit();
+    let ok = unsafe { GetPerformanceInfo(perf_info.as_mut_ptr(), std::mem::size_of::<PERFORMANCE_INFORMATION>() as u32) };
+    if ok == 0 {
+        return Err(FreeError::Other("GetPerformanceInfo failed".into()));
+    }
+    let perf_info = unsafe { perf_info.assume_init() };
+    Ok(perf_info.SystemCache as u64 * perf_info.PageSize as u64)
+}
+#[cfg(target_os = "macos")]
+fn get_system_buffers() -> Result<u64, FreeError> {
+    use std::process::Command;
+    // vm_statでバッファページ数を取得
+    let output = Command::new("vm_stat").output()?;
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    let mut buffer_pages = 0u64;
+    let mut page_size = 4096u64;
+    for line in output_str.lines() {
+        if line.contains("page size of") {
+            if let Some(size_str) = line.split_whitespace().last() {
+                page_size = size_str.parse::<u64>().unwrap_or(4096);
+            }
+        } else if line.starts_with("Pages speculative:") {
+            if let Some(num_str) = line.split(':').nth(1) {
+                buffer_pages = num_str.trim().trim_end_matches('.').parse::<u64>().unwrap_or(0);
+            }
+        }
+    }
+    Ok(buffer_pages * page_size)
 } 

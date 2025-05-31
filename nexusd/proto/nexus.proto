@@ -1,0 +1,1028 @@
+syntax = "proto3";
+
+package nexusd;
+
+// コンテナサービス
+service ContainerService {
+    rpc CreateContainer(CreateContainerRequest) returns (CreateContainerResponse);
+    rpc StartContainer(StartContainerRequest) returns (StartContainerResponse);
+    rpc StopContainer(StopContainerRequest) returns (StopContainerResponse);
+    rpc RemoveContainer(RemoveContainerRequest) returns (RemoveContainerResponse);
+    rpc ListContainers(ListContainersRequest) returns (ListContainersResponse);
+    rpc InspectContainer(InspectContainerRequest) returns (InspectContainerResponse);
+    rpc ContainerLogs(ContainerLogsRequest) returns (stream ContainerLogsResponse);
+    rpc ExecInContainer(ExecInContainerRequest) returns (ExecInContainerResponse);
+    rpc PauseContainer(PauseContainerRequest) returns (PauseContainerResponse);
+    rpc UnpauseContainer(UnpauseContainerRequest) returns (UnpauseContainerResponse);
+    rpc UpdateContainer(UpdateContainerRequest) returns (UpdateContainerResponse);
+    rpc GetContainerStats(GetContainerStatsRequest) returns (GetContainerStatsResponse);
+}
+
+// イメージサービス
+service ImageService {
+    rpc PullImage(PullImageRequest) returns (stream PullImageResponse);
+    rpc PushImage(PushImageRequest) returns (stream PushImageResponse);
+    rpc BuildImage(BuildImageRequest) returns (stream BuildImageResponse);
+    rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+    rpc RemoveImage(RemoveImageRequest) returns (RemoveImageResponse);
+    rpc InspectImage(InspectImageRequest) returns (InspectImageResponse);
+    rpc TagImage(TagImageRequest) returns (TagImageResponse);
+    rpc ImportImage(ImportImageRequest) returns (ImportImageResponse);
+    rpc ExportImage(ExportImageRequest) returns (ExportImageResponse);
+}
+
+// ボリュームサービス
+service VolumeService {
+    rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+    rpc RemoveVolume(RemoveVolumeRequest) returns (RemoveVolumeResponse);
+    rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+    rpc InspectVolume(InspectVolumeRequest) returns (InspectVolumeResponse);
+    rpc PruneVolumes(PruneVolumesRequest) returns (PruneVolumesResponse);
+}
+
+// ネットワークサービス
+service NetworkService {
+    rpc CreateNetwork(CreateNetworkRequest) returns (CreateNetworkResponse);
+    rpc RemoveNetwork(RemoveNetworkRequest) returns (RemoveNetworkResponse);
+    rpc ListNetworks(ListNetworksRequest) returns (ListNetworksResponse);
+    rpc InspectNetwork(InspectNetworkRequest) returns (InspectNetworkResponse);
+    rpc ConnectContainer(ConnectContainerRequest) returns (ConnectContainerResponse);
+    rpc DisconnectContainer(DisconnectContainerRequest) returns (DisconnectContainerResponse);
+}
+
+// システムサービス
+service SystemService {
+    rpc GetVersion(GetVersionRequest) returns (GetVersionResponse);
+    rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+    rpc GetEvents(GetEventsRequest) returns (stream GetEventsResponse);
+    rpc Ping(PingRequest) returns (PingResponse);
+    rpc GetDiskUsage(GetDiskUsageRequest) returns (GetDiskUsageResponse);
+    rpc PruneSystem(PruneSystemRequest) returns (PruneSystemResponse);
+}
+
+// 共通メッセージタイプ
+message Empty {}
+
+// コンテナ関連メッセージ
+message CreateContainerRequest {
+    string name = 1;
+    ContainerConfig config = 2;
+    HostConfig host_config = 3;
+    string image = 4;
+}
+
+message CreateContainerResponse {
+    string container_id = 1;
+    repeated string warnings = 2;
+}
+
+message StartContainerRequest {
+    string container_id = 1;
+}
+
+message StartContainerResponse {}
+
+message StopContainerRequest {
+    string container_id = 1;
+    int32 timeout = 2;
+}
+
+message StopContainerResponse {}
+
+message RemoveContainerRequest {
+    string container_id = 1;
+    bool force = 2;
+    bool remove_volumes = 3;
+}
+
+message RemoveContainerResponse {}
+
+message ListContainersRequest {
+    bool all = 1;
+    int32 limit = 2;
+    bool size = 3;
+    map<string, string> filters = 4;
+}
+
+message ListContainersResponse {
+    repeated ContainerSummary containers = 1;
+}
+
+message InspectContainerRequest {
+    string container_id = 1;
+    bool size = 2;
+}
+
+message InspectContainerResponse {
+    ContainerInspect container = 1;
+}
+
+message ContainerLogsRequest {
+    string container_id = 1;
+    bool follow = 2;
+    bool stdout = 3;
+    bool stderr = 4;
+    int32 since = 5;
+    int32 until = 6;
+    bool timestamps = 7;
+    string tail = 8;
+}
+
+message ContainerLogsResponse {
+    bytes data = 1;
+    int32 stream_type = 2; // 1: stdout, 2: stderr
+}
+
+message ExecInContainerRequest {
+    string container_id = 1;
+    repeated string cmd = 2;
+    bool attach_stdin = 3;
+    bool attach_stdout = 4;
+    bool attach_stderr = 5;
+    bool tty = 6;
+    map<string, string> env = 7;
+    string workdir = 8;
+    string user = 9;
+}
+
+message ExecInContainerResponse {
+    string exec_id = 1;
+}
+
+message PauseContainerRequest {
+    string container_id = 1;
+}
+
+message PauseContainerResponse {}
+
+message UnpauseContainerRequest {
+    string container_id = 1;
+}
+
+message UnpauseContainerResponse {}
+
+message UpdateContainerRequest {
+    string container_id = 1;
+    UpdateConfig update_config = 2;
+}
+
+message UpdateContainerResponse {
+    repeated string warnings = 1;
+}
+
+message GetContainerStatsRequest {
+    string container_id = 1;
+    bool stream = 2;
+}
+
+message GetContainerStatsResponse {
+    ContainerStats stats = 1;
+}
+
+// イメージ関連メッセージ
+message PullImageRequest {
+    string image = 1;
+    string tag = 2;
+    string platform = 3;
+    map<string, string> auth = 4;
+}
+
+message PullImageResponse {
+    string status = 1;
+    string progress = 2;
+    string id = 3;
+}
+
+message PushImageRequest {
+    string image = 1;
+    string tag = 2;
+    map<string, string> auth = 3;
+}
+
+message PushImageResponse {
+    string status = 1;
+    string progress = 2;
+    string id = 3;
+}
+
+message BuildImageRequest {
+    bytes context = 1;
+    string dockerfile = 2;
+    string tag = 3;
+    map<string, string> build_args = 4;
+    repeated string labels = 5;
+    string target = 6;
+    bool no_cache = 7;
+    bool pull = 8;
+}
+
+message BuildImageResponse {
+    string stream = 1;
+    string aux = 2;
+    string error = 3;
+}
+
+message ListImagesRequest {
+    bool all = 1;
+    map<string, string> filters = 2;
+    bool digests = 3;
+}
+
+message ListImagesResponse {
+    repeated ImageSummary images = 1;
+}
+
+message RemoveImageRequest {
+    string image = 1;
+    bool force = 2;
+    bool no_prune = 3;
+}
+
+message RemoveImageResponse {
+    repeated ImageDeleteResponse deleted = 1;
+}
+
+message InspectImageRequest {
+    string image = 1;
+}
+
+message InspectImageResponse {
+    ImageInspect image = 1;
+}
+
+message TagImageRequest {
+    string image = 1;
+    string repo = 2;
+    string tag = 3;
+}
+
+message TagImageResponse {}
+
+message ImportImageRequest {
+    bytes tarball = 1;
+    string repo = 2;
+    string tag = 3;
+    string message = 4;
+    repeated string changes = 5;
+}
+
+message ImportImageResponse {
+    string status = 1;
+}
+
+message ExportImageRequest {
+    string image = 1;
+}
+
+message ExportImageResponse {
+    bytes data = 1;
+}
+
+// ボリューム関連メッセージ
+message CreateVolumeRequest {
+    VolumeConfig config = 1;
+}
+
+message CreateVolumeResponse {
+    Volume volume = 1;
+}
+
+message RemoveVolumeRequest {
+    string name = 1;
+    bool force = 2;
+}
+
+message RemoveVolumeResponse {}
+
+message ListVolumesRequest {
+    map<string, string> filters = 1;
+}
+
+message ListVolumesResponse {
+    repeated Volume volumes = 1;
+    repeated string warnings = 2;
+}
+
+message InspectVolumeRequest {
+    string name = 1;
+}
+
+message InspectVolumeResponse {
+    Volume volume = 1;
+}
+
+message PruneVolumesRequest {
+    map<string, string> filters = 1;
+}
+
+message PruneVolumesResponse {
+    repeated string volumes_deleted = 1;
+    int64 space_reclaimed = 2;
+}
+
+// ネットワーク関連メッセージ
+message CreateNetworkRequest {
+    NetworkConfig config = 1;
+}
+
+message CreateNetworkResponse {
+    string network_id = 1;
+    repeated string warnings = 2;
+}
+
+message RemoveNetworkRequest {
+    string network_id = 1;
+}
+
+message RemoveNetworkResponse {}
+
+message ListNetworksRequest {
+    map<string, string> filters = 1;
+}
+
+message ListNetworksResponse {
+    repeated NetworkSummary networks = 1;
+}
+
+message InspectNetworkRequest {
+    string network_id = 1;
+    bool verbose = 2;
+    string scope = 3;
+}
+
+message InspectNetworkResponse {
+    NetworkInspect network = 1;
+}
+
+message ConnectContainerRequest {
+    string network_id = 1;
+    string container_id = 2;
+    EndpointConfig endpoint_config = 3;
+}
+
+message ConnectContainerResponse {}
+
+message DisconnectContainerRequest {
+    string network_id = 1;
+    string container_id = 2;
+    bool force = 3;
+}
+
+message DisconnectContainerResponse {}
+
+// システム関連メッセージ
+message GetVersionRequest {}
+
+message GetVersionResponse {
+    string version = 1;
+    string api_version = 2;
+    string git_commit = 3;
+    string build_time = 4;
+    string arch = 5;
+    string os = 6;
+    string kernel_version = 7;
+}
+
+message GetInfoRequest {}
+
+message GetInfoResponse {
+    SystemInfo info = 1;
+}
+
+message GetEventsRequest {
+    int64 since = 1;
+    int64 until = 2;
+    map<string, string> filters = 3;
+}
+
+message GetEventsResponse {
+    Event event = 1;
+}
+
+message PingRequest {}
+
+message PingResponse {
+    string api_version = 1;
+    string builder_version = 2;
+}
+
+message GetDiskUsageRequest {}
+
+message GetDiskUsageResponse {
+    DiskUsage usage = 1;
+}
+
+message PruneSystemRequest {
+    map<string, string> filters = 1;
+}
+
+message PruneSystemResponse {
+    repeated string containers_deleted = 1;
+    int64 space_reclaimed = 2;
+}
+
+// 共通データ構造
+message ContainerConfig {
+    string hostname = 1;
+    string domainname = 2;
+    string user = 3;
+    bool attach_stdin = 4;
+    bool attach_stdout = 5;
+    bool attach_stderr = 6;
+    repeated string exposed_ports = 7;
+    bool tty = 8;
+    bool open_stdin = 9;
+    bool stdin_once = 10;
+    repeated string env = 11;
+    repeated string cmd = 12;
+    HealthcheckConfig healthcheck = 13;
+    bool args_escaped = 14;
+    string image = 15;
+    map<string, Volume> volumes = 16;
+    string working_dir = 17;
+    repeated string entrypoint = 18;
+    bool network_disabled = 19;
+    string mac_address = 20;
+    repeated string on_build = 21;
+    map<string, string> labels = 22;
+    string stop_signal = 23;
+    int32 stop_timeout = 24;
+    repeated string shell = 25;
+}
+
+message HostConfig {
+    repeated Bind binds = 1;
+    repeated string container_id_file = 2;
+    LogConfig log_config = 3;
+    string network_mode = 4;
+    PortMap port_bindings = 5;
+    RestartPolicy restart_policy = 6;
+    bool auto_remove = 7;
+    repeated string volume_driver = 8;
+    repeated string volumes_from = 9;
+    repeated string cap_add = 10;
+    repeated string cap_drop = 11;
+    repeated string dns = 12;
+    repeated string dns_options = 13;
+    repeated string dns_search = 14;
+    repeated string extra_hosts = 15;
+    repeated string group_add = 16;
+    string ipc_mode = 17;
+    string cgroup_parent = 18;
+    repeated string links = 19;
+    string oom_kill_disable = 20;
+    string pid_mode = 21;
+    bool privileged = 22;
+    bool publish_all_ports = 23;
+    bool readonly_rootfs = 24;
+    repeated string security_opt = 25;
+    map<string, string> storage_opt = 26;
+    map<string, string> tmpfs = 27;
+    string uts_mode = 28;
+    string userns_mode = 29;
+    int64 shm_size = 30;
+    map<string, string> sysctls = 31;
+    string runtime = 32;
+    repeated string console_size = 33;
+    string isolation = 34;
+    ResourceLimits resources = 35;
+    repeated Mount mounts = 36;
+    repeated string mask_paths = 37;
+    repeated string readonly_paths = 38;
+    bool init = 39;
+}
+
+message ResourceLimits {
+    int64 memory = 1;
+    int64 memory_swap = 2;
+    int64 memory_reservation = 3;
+    int64 kernel_memory = 4;
+    int64 cpu_count = 5;
+    int64 cpu_percent = 6;
+    int64 cpu_shares = 7;
+    int64 cpu_period = 8;
+    int64 cpu_quota = 9;
+    string cpu_realtime_period = 10;
+    string cpu_realtime_runtime = 11;
+    string cpuset_cpus = 12;
+    string cpuset_mems = 13;
+    int64 blkio_weight = 14;
+    repeated BlkioDeviceRate blkio_weight_device = 15;
+    repeated BlkioDeviceRate blkio_device_read_bps = 16;
+    repeated BlkioDeviceRate blkio_device_write_bps = 17;
+    repeated BlkioDeviceRate blkio_device_read_iops = 18;
+    repeated BlkioDeviceRate blkio_device_write_iops = 19;
+    int64 memory_swappiness = 20;
+    bool oom_kill_disable = 21;
+    int64 pids_limit = 22;
+}
+
+message BlkioDeviceRate {
+    string path = 1;
+    int64 rate = 2;
+}
+
+message Mount {
+    string target = 1;
+    string source = 2;
+    string type = 3;
+    bool read_only = 4;
+    string consistency = 5;
+    BindOptions bind_options = 6;
+    VolumeOptions volume_options = 7;
+    TmpfsOptions tmpfs_options = 8;
+}
+
+message BindOptions {
+    string propagation = 1;
+    bool non_recursive = 2;
+}
+
+message VolumeOptions {
+    bool no_copy = 1;
+    map<string, string> labels = 2;
+    VolumeDriverConfig driver_config = 3;
+}
+
+message VolumeDriverConfig {
+    string name = 1;
+    map<string, string> options = 2;
+}
+
+message TmpfsOptions {
+    int64 size_bytes = 1;
+    int32 mode = 2;
+}
+
+message PortMap {
+    map<string, repeated PortBinding> ports = 1;
+}
+
+message PortBinding {
+    string host_ip = 1;
+    string host_port = 2;
+}
+
+message Bind {
+    string source = 1;
+    string target = 2;
+    string mode = 3;
+}
+
+message LogConfig {
+    string type = 1;
+    map<string, string> config = 2;
+}
+
+message RestartPolicy {
+    string name = 1;
+    int32 maximum_retry_count = 2;
+}
+
+message HealthcheckConfig {
+    repeated string test = 1;
+    int64 interval = 2;
+    int64 timeout = 3;
+    int64 start_period = 4;
+    int32 retries = 5;
+}
+
+message UpdateConfig {
+    ResourceLimits resources = 1;
+    RestartPolicy restart_policy = 2;
+}
+
+message ContainerSummary {
+    string id = 1;
+    repeated string names = 2;
+    string image = 3;
+    string image_id = 4;
+    string command = 5;
+    int64 created = 6;
+    repeated string ports = 7;
+    int64 size_rw = 8;
+    int64 size_root_fs = 9;
+    map<string, string> labels = 10;
+    string state = 11;
+    string status = 12;
+    HostConfig host_config = 13;
+    NetworkSettings network_settings = 14;
+    repeated Mount mounts = 15;
+}
+
+message ContainerInspect {
+    string id = 1;
+    int64 created = 2;
+    string path = 3;
+    repeated string args = 4;
+    ContainerState state = 5;
+    string image = 6;
+    string resolv_conf_path = 7;
+    string hostname_path = 8;
+    string hosts_path = 9;
+    string log_path = 10;
+    string name = 11;
+    int32 restart_count = 12;
+    string driver = 13;
+    string platform = 14;
+    string mount_label = 15;
+    string process_label = 16;
+    string app_armor_profile = 17;
+    repeated string exec_ids = 18;
+    HostConfig host_config = 19;
+    GraphDriverData graph_driver = 20;
+    int64 size_rw = 21;
+    int64 size_root_fs = 22;
+    repeated Mount mounts = 23;
+    ContainerConfig config = 24;
+    NetworkSettings network_settings = 25;
+}
+
+message ContainerState {
+    string status = 1;
+    bool running = 2;
+    bool paused = 3;
+    bool restarting = 4;
+    bool oom_killed = 5;
+    bool dead = 6;
+    int32 pid = 7;
+    int32 exit_code = 8;
+    string error = 9;
+    string started_at = 10;
+    string finished_at = 11;
+}
+
+message NetworkSettings {
+    string bridge = 1;
+    string sandbox_id = 2;
+    bool hairpin_mode = 3;
+    string link_local_ipv6_address = 4;
+    int32 link_local_ipv6_prefix_len = 5;
+    map<string, string> ports = 6;
+    string sandbox_key = 7;
+    repeated string secondary_ip_addresses = 8;
+    repeated string secondary_ipv6_addresses = 9;
+    string endpoint_id = 10;
+    string gateway = 11;
+    string global_ipv6_address = 12;
+    int32 global_ipv6_prefix_len = 13;
+    string ip_address = 14;
+    int32 ip_prefix_len = 15;
+    string ipv6_gateway = 16;
+    string mac_address = 17;
+    map<string, EndpointSettings> networks = 18;
+}
+
+message EndpointSettings {
+    EndpointIPAMConfig ipam_config = 1;
+    repeated string links = 2;
+    repeated string aliases = 3;
+    string network_id = 4;
+    string endpoint_id = 5;
+    string gateway = 6;
+    string ip_address = 7;
+    int32 ip_prefix_len = 8;
+    string ipv6_gateway = 9;
+    string global_ipv6_address = 10;
+    int32 global_ipv6_prefix_len = 11;
+    string mac_address = 12;
+    map<string, string> driver_opts = 13;
+}
+
+message EndpointIPAMConfig {
+    string ipv4_address = 1;
+    string ipv6_address = 2;
+    repeated string link_local_ips = 3;
+}
+
+message EndpointConfig {
+    EndpointIPAMConfig ipam_config = 1;
+    repeated string links = 2;
+    repeated string aliases = 3;
+}
+
+message GraphDriverData {
+    map<string, string> data = 1;
+    string name = 2;
+}
+
+message ContainerStats {
+    string read = 1;
+    string preread = 2;
+    int32 pids_stats = 3;
+    BlkioStats blkio_stats = 4;
+    int32 num_procs = 5;
+    StorageStats storage_stats = 6;
+    CpuStats cpu_stats = 7;
+    CpuStats precpu_stats = 8;
+    MemoryStats memory_stats = 9;
+    string name = 10;
+    string id = 11;
+    map<string, NetworkStats> networks = 12;
+}
+
+message BlkioStats {
+    repeated BlkioStatEntry io_service_bytes_recursive = 1;
+    repeated BlkioStatEntry io_serviced_recursive = 2;
+    repeated BlkioStatEntry io_queue_recursive = 3;
+    repeated BlkioStatEntry io_service_time_recursive = 4;
+    repeated BlkioStatEntry io_wait_time_recursive = 5;
+    repeated BlkioStatEntry io_merged_recursive = 6;
+    repeated BlkioStatEntry io_time_recursive = 7;
+    repeated BlkioStatEntry sectors_recursive = 8;
+}
+
+message BlkioStatEntry {
+    string major = 1;
+    string minor = 2;
+    string op = 3;
+    int64 value = 4;
+}
+
+message StorageStats {
+    int64 read_count_normalized = 1;
+    int64 read_size_bytes = 2;
+    int64 write_count_normalized = 3;
+    int64 write_size_bytes = 4;
+}
+
+message CpuStats {
+    CpuUsage cpu_usage = 1;
+    int64 system_cpu_usage = 2;
+    int32 online_cpus = 3;
+    ThrottlingData throttling_data = 4;
+}
+
+message CpuUsage {
+    int64 total_usage = 1;
+    repeated int64 percpu_usage = 2;
+    int64 usage_in_kernelmode = 3;
+    int64 usage_in_usermode = 4;
+}
+
+message ThrottlingData {
+    int64 periods = 1;
+    int64 throttled_periods = 2;
+    int64 throttled_time = 3;
+}
+
+message MemoryStats {
+    int64 usage = 1;
+    int64 max_usage = 2;
+    map<string, int64> stats = 3;
+    int64 limit = 4;
+}
+
+message NetworkStats {
+    int64 rx_bytes = 1;
+    int64 rx_packets = 2;
+    int64 rx_errors = 3;
+    int64 rx_dropped = 4;
+    int64 tx_bytes = 5;
+    int64 tx_packets = 6;
+    int64 tx_errors = 7;
+    int64 tx_dropped = 8;
+}
+
+message ImageSummary {
+    string id = 1;
+    string parent_id = 2;
+    repeated string repo_tags = 3;
+    repeated string repo_digests = 4;
+    int64 created = 5;
+    int64 size = 6;
+    int64 shared_size = 7;
+    int64 virtual_size = 8;
+    map<string, string> labels = 9;
+    int32 containers = 10;
+}
+
+message ImageDeleteResponse {
+    string untagged = 1;
+    string deleted = 2;
+}
+
+message ImageInspect {
+    string id = 1;
+    repeated string repo_tags = 2;
+    repeated string repo_digests = 3;
+    string parent = 4;
+    string comment = 5;
+    string created = 6;
+    string container = 7;
+    ContainerConfig container_config = 8;
+    string docker_version = 9;
+    string author = 10;
+    ContainerConfig config = 11;
+    string architecture = 12;
+    string os = 13;
+    int64 size = 14;
+    int64 virtual_size = 15;
+    GraphDriverData graph_driver = 16;
+    repeated RootFS rootfs = 17;
+    map<string, string> metadata = 18;
+}
+
+message RootFS {
+    string type = 1;
+    repeated string layers = 2;
+    string base_layer = 3;
+}
+
+message Volume {
+    string name = 1;
+    string driver = 2;
+    string mountpoint = 3;
+    int64 created_at = 4;
+    map<string, string> status = 5;
+    map<string, string> labels = 6;
+    string scope = 7;
+    map<string, string> options = 8;
+    VolumeUsageData usage_data = 9;
+}
+
+message VolumeUsageData {
+    int64 size = 1;
+    int64 ref_count = 2;
+}
+
+message VolumeConfig {
+    string name = 1;
+    string driver = 2;
+    map<string, string> driver_opts = 3;
+    map<string, string> labels = 4;
+}
+
+message NetworkSummary {
+    string name = 1;
+    string id = 2;
+    int64 created = 3;
+    string scope = 4;
+    string driver = 5;
+    bool enable_ipv6 = 6;
+    NetworkIPAM ipam = 7;
+    bool internal = 8;
+    bool attachable = 9;
+    bool ingress = 10;
+    map<string, string> options = 11;
+    map<string, string> labels = 12;
+}
+
+message NetworkInspect {
+    string name = 1;
+    string id = 2;
+    int64 created = 3;
+    string scope = 4;
+    string driver = 5;
+    bool enable_ipv6 = 6;
+    NetworkIPAM ipam = 7;
+    bool internal = 8;
+    bool attachable = 9;
+    bool ingress = 10;
+    map<string, EndpointResource> containers = 11;
+    map<string, string> options = 12;
+    map<string, string> labels = 13;
+}
+
+message NetworkIPAM {
+    string driver = 1;
+    repeated IPAMConfig config = 2;
+    map<string, string> options = 3;
+}
+
+message IPAMConfig {
+    string subnet = 1;
+    string ip_range = 2;
+    string gateway = 3;
+    map<string, string> aux_addresses = 4;
+}
+
+message EndpointResource {
+    string name = 1;
+    string endpoint_id = 2;
+    string mac_address = 3;
+    string ipv4_address = 4;
+    string ipv6_address = 5;
+}
+
+message NetworkConfig {
+    string name = 1;
+    bool check_duplicate = 2;
+    string driver = 3;
+    bool internal = 4;
+    bool attachable = 5;
+    bool ingress = 6;
+    NetworkIPAM ipam = 7;
+    bool enable_ipv6 = 8;
+    map<string, string> options = 9;
+    map<string, string> labels = 10;
+}
+
+message SystemInfo {
+    string id = 1;
+    int32 containers = 2;
+    int32 containers_running = 3;
+    int32 containers_paused = 4;
+    int32 containers_stopped = 5;
+    int32 images = 6;
+    string driver = 7;
+    repeated string driver_status = 8;
+    string docker_root_dir = 9;
+    repeated string index_server_address = 10;
+    string init_sha1 = 11;
+    string kernel_version = 12;
+    map<string, string> labels = 13;
+    bool mem_total = 14;
+    string memory_limit = 15;
+    int32 ncpu = 16;
+    int32 n_events_listener = 17;
+    int32 n_fd = 18;
+    int32 n_goroutines = 19;
+    string name = 20;
+    string operating_system = 21;
+    string oom_kill_disable = 22;
+    string ostype = 23;
+    string server_version = 24;
+    bool swap_limit = 25;
+    repeated PluginInfo plugins = 26;
+    RuntimeInfo default_runtime = 27;
+    map<string, RuntimeInfo> runtimes = 28;
+    string security_options = 29;
+}
+
+message PluginInfo {
+    string type = 1;
+    string name = 2;
+}
+
+message RuntimeInfo {
+    string path = 1;
+    repeated string runtime_args = 2;
+}
+
+message Event {
+    string type = 1;
+    string action = 2;
+    string actor = 3;
+    int64 time = 4;
+    int64 time_nano = 5;
+    map<string, string> attributes = 6;
+}
+
+message DiskUsage {
+    repeated LayerSize layers = 1;
+    repeated ImageDiskUsage images = 2;
+    repeated ContainerDiskUsage containers = 3;
+    repeated VolumeDiskUsage volumes = 4;
+    BuildCache build_cache = 5;
+}
+
+message LayerSize {
+    string id = 1;
+    int64 size = 2;
+}
+
+message ImageDiskUsage {
+    string id = 1;
+    int64 created = 2;
+    int64 size = 3;
+    int64 shared_size = 4;
+    repeated string repo_tags = 5;
+    repeated string repo_digests = 6;
+    int32 containers = 7;
+}
+
+message ContainerDiskUsage {
+    string id = 1;
+    repeated string names = 2;
+    string image = 3;
+    string image_id = 4;
+    string command = 5;
+    int64 created = 6;
+    string state = 7;
+    string status = 8;
+    int64 size_rw = 9;
+    int64 size_root_fs = 10;
+    map<string, string> labels = 11;
+    repeated Mount mounts = 12;
+}
+
+message VolumeDiskUsage {
+    string name = 1;
+    map<string, string> labels = 2;
+    string mountpoint = 3;
+    VolumeUsageData usage_data = 4;
+}
+
+message BuildCache {
+    string id = 1;
+    string parent = 2;
+    string type = 3;
+    string description = 4;
+    bool in_use = 5;
+    bool shared = 6;
+    int64 size = 7;
+    int64 created_at = 8;
+    int64 last_used_at = 9;
+    int32 usage_count = 10;
+} 

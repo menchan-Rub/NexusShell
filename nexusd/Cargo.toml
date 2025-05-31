@@ -1,0 +1,72 @@
+[package]
+name = "nexusd"
+version = "0.1.0"
+edition = "2021"
+description = "NexusContainer daemon for container management"
+authors = ["NexusShell Team"]
+
+[[bin]]
+name = "nexusd"
+path = "src/main.rs"
+
+[dependencies]
+# 非同期ランタイム
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "time", "signal"] }
+tokio-stream = "0.1.14"
+
+# gRPC関連
+tonic = "0.11.0"
+tonic-reflection = "0.11.0"
+prost = "0.12.4"
+prost-types = "0.12.4"
+
+# HTTP/REST API関連
+axum = "0.7.5"
+tower = "0.4.13"
+tower-http = { version = "0.5.2", features = ["fs", "cors", "compression-full"] }
+hyper = { version = "1.0", features = ["full"] }
+
+# シリアライゼーション
+serde = { workspace = true, features = ["rc"] }
+serde_json = "1.0.117"
+serde_yaml = "0.9.34"
+
+# ロギング
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+log = "0.4.21"
+env_logger = "0.11.3"
+
+# エラーハンドリング
+anyhow = { workspace = true }
+thiserror = "1.0.61"
+
+# 設定管理
+clap = { version = "4.5.4", features = ["derive"] }
+config = "0.14.0"
+toml = "0.8.12"
+
+# ユーティリティ
+uuid = { version = "1.8.0", features = ["v4", "serde"] }
+chrono = { version = "0.4.38", features = ["serde"] }
+bytes = "1.6.0"
+futures = "0.3.30"
+num_cpus = "1.16.0"
+
+# プロセス管理
+nix = { version = "0.28.0", features = ["signal", "process", "mount", "fs"] }
+
+# コアライブラリ
+libnexuscontainer = { path = "../libnexuscontainer" }
+
+# Unix-specific dependencies
+[target.'cfg(unix)'.dependencies]
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+daemonize = "0.5"
+
+[build-dependencies]
+tonic-build = "0.11.0"
+prost-build = "0.12.4"
+
+[features]
+default = [] 

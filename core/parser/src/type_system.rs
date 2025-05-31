@@ -618,10 +618,12 @@ impl TypeChecker {
                         TypeKind::Function { params, return_type } => {
                             // 引数の数をチェック
                             if self.strict_mode && args.len() != params.len() {
+                                let span = node.span().clone();
                                 self.errors.push(Error::new(
                                     format!("関数 {} の引数の数が一致しません: 期待={}, 実際={}", 
                                         name_str, params.len(), args.len()),
-                                    node.span().clone()
+                                    span,
+                                    Some(format!("関数定義: {}({})\n呼び出し: {}({})", name_str, params.iter().map(|p| p.name()).collect::<Vec<_>>().join(","), name_str, args.iter().map(|a| a.name()).collect::<Vec<_>>().join(",")))
                                 ));
                                 
                                 return Err(Error::new(
@@ -640,18 +642,22 @@ impl TypeChecker {
                                         if self.allow_auto_conversion && arg_type.can_auto_convert_to(param_type) {
                                             // 自動変換可能なら警告のみ
                                             if self.strict_mode {
+                                                let span = arg.span().clone();
                                                 self.errors.push(Error::new(
                                                     format!("引数 #{} の型が一致しません: 期待={}, 実際={} (自動変換あり)", 
                                                         i+1, param_type.name(), arg_type.name()),
-                                                    arg.span().clone()
+                                                    span,
+                                                    Some(format!("関数定義: {}({})\n呼び出し: {}({})", name_str, params.iter().map(|p| p.name()).collect::<Vec<_>>().join(","), name_str, args.iter().map(|a| a.name()).collect::<Vec<_>>().join(",")))
                                                 ));
                                             }
                                         } else {
                                             // 型が一致せず変換も不可なら型エラー
+                                            let span = arg.span().clone();
                                             self.errors.push(Error::new(
                                                 format!("引数 #{} の型が一致しません: 期待={}, 実際={}", 
                                                     i+1, param_type.name(), arg_type.name()),
-                                                arg.span().clone()
+                                                span,
+                                                Some(format!("関数定義: {}({})\n呼び出し: {}({})", name_str, params.iter().map(|p| p.name()).collect::<Vec<_>>().join(","), name_str, args.iter().map(|a| a.name()).collect::<Vec<_>>().join(",")))
                                             ));
                                             
                                             return Err(Error::new(

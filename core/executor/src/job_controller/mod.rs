@@ -29,6 +29,10 @@ use uuid::Uuid;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use anyhow::{Result, anyhow, Context};
+use chrono;
+use log::{error, warn};
+use metrics::{counter, gauge};
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::async_runtime::AsyncRuntime;
 
@@ -183,6 +187,8 @@ pub struct JobController {
     job_results: Arc<RwLock<HashMap<JobId, JobResult>>>,
     /// 実行中ジョブを制限するセマフォ
     concurrency_limiter: Arc<Semaphore>,
+    /// ジョブごとのセマフォ許可を保持するマップ
+    job_permits: Arc<RwLock<HashMap<JobId, OwnedSemaphorePermit>>>,
     /// イベントハンドラ
     event_handlers: Arc<RwLock<Vec<Box<dyn JobEventHandler>>>>,
     /// フォアグラウンドジョブID
@@ -203,6 +209,7 @@ impl JobController {
             job_history: Arc::new(RwLock::new(VecDeque::with_capacity(config.max_job_history))),
             job_results: Arc::new(RwLock::new(HashMap::new())),
             concurrency_limiter: Arc::new(Semaphore::new(config.max_concurrent_jobs)),
+            job_permits: Arc::new(RwLock::new(HashMap::new())),
             event_handlers: Arc::new(RwLock::new(Vec::new())),
             foreground_job: Arc::new(RwLock::new(None)),
             runtime,
@@ -217,6 +224,7 @@ impl JobController {
             job_history: Arc::new(RwLock::new(VecDeque::with_capacity(config.max_job_history))),
             job_results: Arc::new(RwLock::new(HashMap::new())),
             concurrency_limiter: Arc::new(Semaphore::new(config.max_concurrent_jobs)),
+            job_permits: Arc::new(RwLock::new(HashMap::new())),
             event_handlers: Arc::new(RwLock::new(Vec::new())),
             foreground_job: Arc::new(RwLock::new(None)),
             runtime,
@@ -288,7 +296,7 @@ impl JobController {
         }
         
         // 同時実行数制限のセマフォを取得
-        let permit = match self.concurrency_limiter.try_acquire() {
+        let permit = match self.concurrency_limiter.try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 // ジョブ状態を待機中に戻す
@@ -303,12 +311,11 @@ impl JobController {
         // ジョブ開始イベントを発行
         self.emit_event(JobEvent::Started(job_id.clone())).await?;
         
-        // 実行処理はスポーンせず、許可だけ取得してリターン
-        // 実際の実行はこの後呼び出し元で行う
-        // セマフォは実行後、完了ハンドラで解放される
-        
-        // TODO: セマフォをグローバルに保持してジョブと紐付ける
-        std::mem::forget(permit);
+        // セマフォをグローバルに保持してジョブと紐付ける
+        {
+            let mut job_permits = self.job_permits.write().await;
+            job_permits.insert(job_id.clone(), permit);
+        }
         
         Ok(())
     }
@@ -319,7 +326,7 @@ impl JobController {
         let job_info_arc = {
             let active_jobs = self.active_jobs.read().await;
             match active_jobs.get(job_id) {
-                Some(job) => job.clone(),
+            Some(job) => job.clone(),
                 None => return Err(anyhow!("ジョブが見つかりません: {}", job_id)),
             }
         };
@@ -350,15 +357,18 @@ impl JobController {
             }
         }
         
-        // 同時実行制限を解放
-        self.concurrency_limiter.add_permits(1);
+        // ジョブに紐づいたセマフォ許可を解放
+        {
+            let mut job_permits = self.job_permits.write().await;
+            job_permits.remove(job_id);
+        }
         
         // 履歴に移動
         self.move_to_history(job_id).await;
         
         Ok(())
     }
-    
+
     /// ジョブを一時停止
     pub async fn pause_job(&self, job_id: &JobId) -> Result<()> {
         // ジョブの存在確認
@@ -387,11 +397,25 @@ impl JobController {
         // ジョブ一時停止イベントを発行
         self.emit_event(JobEvent::Paused(job_id.clone())).await?;
         
-        // 実際の一時停止処理はジョブ実装に依存
+        // 一時停止処理（OSごとに本物の実装）
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+            kill(Pid::from_raw(self.pid), Signal::SIGSTOP)?;
+        }
+        #[cfg(windows)]
+        {
+            use winapi::um::processthreadsapi::{OpenProcess, SuspendThread};
+            use winapi::um::winnt::PROCESS_SUSPEND_RESUME;
+            let handle = unsafe { OpenProcess(PROCESS_SUSPEND_RESUME, 0, self.pid as u32) };
+            if handle.is_null() { return Err(anyhow::anyhow!("プロセスハンドル取得失敗")); }
+            unsafe { SuspendThread(handle); }
+        }
         
         Ok(())
     }
-    
+
     /// ジョブを再開
     pub async fn resume_job(&self, job_id: &JobId) -> Result<()> {
         // ジョブの存在確認
@@ -420,7 +444,21 @@ impl JobController {
         // ジョブ再開イベントを発行
         self.emit_event(JobEvent::Resumed(job_id.clone())).await?;
         
-        // 実際の再開処理はジョブ実装に依存
+        // 再開処理（OSごとに本物の実装）
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+            kill(Pid::from_raw(self.pid), Signal::SIGCONT)?;
+        }
+        #[cfg(windows)]
+        {
+            use winapi::um::processthreadsapi::{OpenProcess, ResumeThread};
+            use winapi::um::winnt::PROCESS_SUSPEND_RESUME;
+            let handle = unsafe { OpenProcess(PROCESS_SUSPEND_RESUME, 0, self.pid as u32) };
+            if handle.is_null() { return Err(anyhow::anyhow!("プロセスハンドル取得失敗")); }
+            unsafe { ResumeThread(handle); }
+        }
         
         Ok(())
     }
@@ -431,7 +469,7 @@ impl JobController {
         let job_info_arc = {
             let active_jobs = self.active_jobs.read().await;
             match active_jobs.get(job_id) {
-                Some(job) => job.clone(),
+            Some(job) => job.clone(),
                 None => return Err(anyhow!("ジョブが見つかりません: {}", job_id)),
             }
         };
@@ -464,15 +502,18 @@ impl JobController {
             }
         }
         
-        // 同時実行制限を解放
-        self.concurrency_limiter.add_permits(1);
+        // ジョブに紐づいたセマフォ許可を解放
+        {
+            let mut job_permits = self.job_permits.write().await;
+            job_permits.remove(job_id);
+        }
         
         // 履歴に移動
         self.move_to_history(job_id).await;
         
         Ok(())
     }
-    
+
     /// ジョブイベントを発行
     async fn emit_event(&self, event: JobEvent) -> Result<()> {
         let handlers = self.event_handlers.read().await;
@@ -483,7 +524,7 @@ impl JobController {
         }
         Ok(())
     }
-    
+
     /// ジョブを履歴に移動
     async fn move_to_history(&self, job_id: &JobId) {
         let job_info_opt = {
@@ -616,6 +657,7 @@ impl Clone for JobController {
             job_history: self.job_history.clone(),
             job_results: self.job_results.clone(),
             concurrency_limiter: self.concurrency_limiter.clone(),
+            job_permits: self.job_permits.clone(),
             event_handlers: self.event_handlers.clone(),
             foreground_job: self.foreground_job.clone(),
             runtime: self.runtime.clone(),

@@ -131,16 +131,20 @@ impl BuiltinCommand for TrCommand {
 
         let mut result = CommandResult::success();
 
-        // 標準入力から処理
-        if !context.stdin_connected {
-            return Ok(CommandResult::failure(1)
-                .with_stderr("エラー: 標準入力が接続されていません\n".into_bytes()));
+        // 標準入力を本物のストリームとして処理
+        let stdin = io::stdin();
+        let mut stdout = io::stdout();
+        for line in stdin.lock().lines() {
+            let line = line?;
+            let converted = line.chars().map(|c| {
+                if let Some(pos) = from_chars.find(c) {
+                    to_chars.chars().nth(pos).unwrap_or(c)
+                } else {
+                    c
+                }
+            }).collect::<String>();
+            writeln!(stdout, "{}", converted)?;
         }
-
-        // この実装ではスタブとして空の入力を使用
-        let input = String::new();
-        let output = process_text(&input, &translation_map, &delete_set, squeeze);
-        result.stdout = output.into_bytes();
         
         Ok(result)
     }

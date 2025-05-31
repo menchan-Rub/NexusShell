@@ -1,0 +1,56 @@
+[package]
+name = "nexus-ctl"
+version = "0.1.0"
+edition = "2021"
+authors = ["NexusShell Team <info@nexusshell.com>"]
+description = "Command-line interface for managing NexusContainers."
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "nexus-ctl"
+path = "src/main.rs"
+
+[dependencies]
+# CLI and argument parsing
+clap = { version = "4.5.4", features = ["derive"] }
+env_logger = "0.11.3"
+log = "0.4.21"
+colored = "2.0"
+
+# Async runtime
+tokio = { version = "1.38.0", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# HTTP client for image pulling
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# File and path utilities
+tempfile = "3.6"
+dirs = "5.0"
+uuid = { version = "1.0", features = ["v4"] }
+
+# Date and time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1.0.70"
+thiserror = "1.0.61"
+
+# Utilities
+sha2 = "0.10.8"
+
+# Interactive prompts
+dialoguer = "0.11.0"
+
+# System interaction (Unix only)
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28.0", features = ["mount", "sched", "signal", "process"] }
+libc = "0.2.155"
+
+# Added from the code block
+rand = "0.8" 

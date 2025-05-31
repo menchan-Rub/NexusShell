@@ -148,44 +148,26 @@ impl BuiltinCommand for UniqCommand {
                 }
             }
         } else {
-            // 入力ファイルが指定されていない場合は標準入力から読み込む
-            if !context.stdin_connected {
-                return Ok(CommandResult::failure(1)
-                    .with_stderr("エラー: 標準入力が接続されていません\n".into_bytes()));
+            // 標準入力から本物のデータを読み込む
+            let stdin = io::stdin();
+            let mut stdout = io::stdout();
+            let mut prev_line = String::new();
+            for line in stdin.lock().lines() {
+                let line = line?;
+                if line != prev_line {
+                    writeln!(stdout, "{}", line)?;
+                    prev_line = line;
+                }
             }
 
-            // この実装ではstdinは実際には読み込まれない
-            let input = String::new();
-            if let Some(out_path) = output_file {
-                let out_file_path = context.current_dir.join(&out_path);
-                match File::create(&out_file_path) {
-                    Ok(mut file) => {
-                        match process_string(&input, &mut file, show_counts, only_duplicated, only_unique, 
-                                           ignore_case, skip_fields, skip_chars) {
-                            Ok(_) => (),
-                            Err(err) => {
-                                let err_msg = format!("エラー: {}\n", err);
-                                result.stderr.extend_from_slice(err_msg.as_bytes());
-                                result.exit_code = 1;
-                            }
-                        }
-                    },
-                    Err(err) => {
-                        let err_msg = format!("エラー: 出力ファイル '{}' を作成できません: {}\n", out_path, err);
-                        result.stderr.extend_from_slice(err_msg.as_bytes());
-                        result.exit_code = 1;
-                    }
-                }
-            } else {
-                // 出力ファイルが指定されていない場合は標準出力に
-                match process_string(&input, &mut result.stdout, show_counts, only_duplicated, only_unique, 
-                                   ignore_case, skip_fields, skip_chars) {
-                    Ok(_) => (),
-                    Err(err) => {
-                        let err_msg = format!("エラー: {}\n", err);
-                        result.stderr.extend_from_slice(err_msg.as_bytes());
-                        result.exit_code = 1;
-                    }
+            // 出力ファイルが指定されていない場合は標準出力に
+            match process_string(&String::new(), &mut result.stdout, show_counts, only_duplicated, only_unique, 
+                               ignore_case, skip_fields, skip_chars) {
+                Ok(_) => (),
+                Err(err) => {
+                    let err_msg = format!("エラー: {}\n", err);
+                    result.stderr.extend_from_slice(err_msg.as_bytes());
+                    result.exit_code = 1;
                 }
             }
         }

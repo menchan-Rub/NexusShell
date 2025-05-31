@@ -677,8 +677,9 @@ impl GrammarEngine {
         } else {
             // トークンが一致しなかった場合
             Err(Error::new(
-                format!("期待: {:?}, 実際: {:?}", token_kind, token.kind),
-                token.span.clone()
+                format!("構文エラー: 期待されたトークンは {:?} でしたが、実際には {:?} でした。", token_kind, token.kind),
+                token.span.clone(),
+                Some(format!("ソース: {} (行: {}, 列: {})", token.lexeme, token.span.line, token.span.column))
             ))
         }
     }

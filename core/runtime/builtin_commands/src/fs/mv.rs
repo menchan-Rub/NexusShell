@@ -120,9 +120,13 @@ impl BuiltinCommand for MvCommand {
                 }
                 
                 if interactive {
-                    // 対話モードの確認（実際にはユーザー入力を求める）
-                    // ここではテスト容易性のためにスキップして常にYesとします
-                    debug!("対話モード: '{}' を上書きしますか？ y/n", final_dest.display());
+                    print!("'{}' を上書きしますか？ (y/n): ", final_dest.display());
+                    io::stdout().flush().unwrap();
+                    let mut answer = String::new();
+                    io::stdin().read_line(&mut answer).unwrap();
+                    if !answer.trim().eq_ignore_ascii_case("y") {
+                        return Ok(CommandResult::success().with_stdout(b"キャンセル\n".to_vec()));
+                    }
                 }
             }
 

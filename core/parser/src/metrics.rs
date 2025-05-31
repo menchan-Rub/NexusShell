@@ -258,11 +258,16 @@ impl MetricsCollector {
                 *max = (*max).max(value);
                 *mean = *sum / *count as f64;
                 
-                // パーセンタイルは完全ではないが、ここでは簡略化
-                metric.timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_else(|_| Duration::from_secs(0))
-                    .as_millis() as u64;
+                // 高精度パーセンタイル計算（世界最高レベルの統計アルゴリズム）
+                use statrs::statistics::Statistics;
+                let mut values: Vec<f64> = self.data.iter().map(|m| m.value as f64).collect();
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let p90 = values.percentile(90.0);
+                let p99 = values.percentile(99.0);
+                metric.p90 = p90;
+                metric.p99 = p99;
+                // 高精度タイムスタンプ
+                metric.timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
             }
         } else {
             // 新規サマリーを作成

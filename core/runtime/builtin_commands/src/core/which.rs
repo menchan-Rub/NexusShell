@@ -57,14 +57,11 @@ impl WhichCommand {
     fn search_command(&self, command: &str, show_all: bool, env: &HashMap<String, String>) -> Vec<String> {
         let mut result = Vec::new();
         
-        // 組み込みコマンドのリスト（実際の実装ではシェルから取得）
-        let builtin_commands = vec![
-            "alias", "cd", "echo", "exit", "export", "help", "history", "jobs", 
-            "pwd", "set", "source", "type", "unset", "which",
-        ];
+        // シェルから組み込みコマンドのリストを取得
+        let builtin_commands = self.get_builtin_commands_from_shell(env);
         
         // 組み込みコマンドのチェック
-        if builtin_commands.contains(&command) {
+        if builtin_commands.contains(&command.to_string()) {
             result.push(format!("{}: シェル組み込みコマンド", command));
             if !show_all {
                 return result;
@@ -112,6 +109,101 @@ impl WhichCommand {
         }
         
         result
+    }
+    
+    /// シェルから組み込みコマンドのリストを取得
+    fn get_builtin_commands_from_shell(&self, env: &HashMap<String, String>) -> Vec<String> {
+        // シェルコンテキストから組み込みコマンドリストを取得
+        if let Some(builtin_list) = env.get("SHELL_BUILTINS") {
+            // SHELL_BUILTINS環境変数が設定されている場合はそこから取得
+            return builtin_list.split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+        }
+        
+        // シェルのタイプを判断
+        let shell_type = if let Some(shell_path) = env.get("SHELL") {
+            if shell_path.contains("bash") {
+                "bash"
+            } else if shell_path.contains("zsh") {
+                "zsh"
+            } else if shell_path.contains("fish") {
+                "fish"
+            } else if shell_path.contains("powershell") || shell_path.contains("pwsh") {
+                "powershell"
+            } else if shell_path.contains("cmd") {
+                "cmd"
+            } else {
+                "unknown"
+            }
+        } else {
+            "unknown"
+        };
+        
+        // シェルごとの組み込みコマンドリストを返す
+        match shell_type {
+            "bash" => vec![
+                "alias", "bg", "bind", "break", "builtin", "caller", "cd", "command", 
+                "compgen", "complete", "compopt", "continue", "declare", "dirs", "disown", 
+                "echo", "enable", "eval", "exec", "exit", "export", "false", "fc", "fg", 
+                "getopts", "hash", "help", "history", "jobs", "kill", "let", "local", 
+                "logout", "mapfile", "popd", "printf", "pushd", "pwd", "read", "readarray", 
+                "readonly", "return", "set", "shift", "shopt", "source", "suspend", "test", 
+                "times", "trap", "true", "type", "typeset", "ulimit", "umask", "unalias", 
+                "unset", "wait", "which"
+            ].iter().map(|&s| s.to_string()).collect(),
+            
+            "zsh" => vec![
+                "alias", "autoload", "bg", "bindkey", "builtin", "cd", "command", "compdef", 
+                "compdescribe", "compfiles", "compgroups", "compquote", "comptags", "comptry", 
+                "compvalues", "declare", "dirs", "disable", "disown", "echo", "echotc", 
+                "emulate", "enable", "eval", "exec", "exit", "export", "false", "fc", "fg", 
+                "functions", "getcap", "getln", "getopts", "hash", "history", "jobs", "kill", 
+                "let", "limit", "local", "log", "logout", "popd", "print", "printf", "pushd", 
+                "pushln", "pwd", "r", "read", "readonly", "rehash", "return", "sched", "set", 
+                "setcap", "setopt", "shift", "source", "suspend", "test", "times", "trap", 
+                "true", "ttyctl", "type", "typeset", "ulimit", "umask", "unalias", "unfunction", 
+                "unhash", "unlimit", "unset", "unsetopt", "vared", "wait", "whence", "where", 
+                "which", "zcompile", "zformat", "zftp", "zle", "zmodload", "zparseopts", "zprof", 
+                "zpty", "zregexparse", "zsocket", "zstyle", "ztcp"
+            ].iter().map(|&s| s.to_string()).collect(),
+            
+            "fish" => vec![
+                "alias", "and", "begin", "bg", "bind", "block", "breakpoint", "builtin", 
+                "case", "cd", "command", "commandline", "complete", "contains", "continue", 
+                "count", "disown", "echo", "else", "emit", "end", "eval", "exec", "exit", 
+                "fg", "for", "function", "functions", "history", "if", "jobs", "math", 
+                "not", "or", "pwd", "random", "read", "return", "set", "status", "switch", 
+                "test", "time", "type", "ulimit", "umask", "while"
+            ].iter().map(|&s| s.to_string()).collect(),
+            
+            "powershell" => vec![
+                "Break", "Clear-Host", "Continue", "Exit", "ForEach-Object", 
+                "Get-Command", "Get-Help", "Get-History", "Get-Job", "Get-Location", 
+                "Get-Member", "Get-Module", "Get-Variable", "Group-Object", 
+                "Invoke-Command", "Invoke-Expression", "Invoke-History", "Measure-Object", 
+                "New-Alias", "New-Item", "New-Module", "New-Object", "New-Variable", 
+                "Out-Default", "Out-Host", "Out-Null", "Read-Host", "Remove-Item", 
+                "Remove-Variable", "Select-Object", "Set-Alias", "Set-Location", 
+                "Set-Variable", "Sort-Object", "Start-Job", "Wait-Job", "Where-Object", 
+                "Write-Host", "Write-Output"
+            ].iter().map(|&s| s.to_string()).collect(),
+            
+            "cmd" => vec![
+                "assoc", "call", "cd", "chdir", "cls", "color", "copy", "date", "del", 
+                "dir", "echo", "endlocal", "erase", "exit", "for", "goto", "if", "md", 
+                "mkdir", "mklink", "move", "path", "pause", "popd", "prompt", "pushd", 
+                "rd", "rem", "ren", "rename", "rmdir", "set", "setlocal", "shift", 
+                "start", "time", "title", "type", "ver", "verify", "vol"
+            ].iter().map(|&s| s.to_string()).collect(),
+            
+            // デフォルトの組み込みコマンド（NexusShell固有）
+            _ => vec![
+                "alias", "cd", "echo", "exit", "export", "help", "history", "jobs", 
+                "pwd", "set", "source", "type", "unset", "which", "nexus", "pipeline",
+                "execute", "transform", "deploy", "analyze"
+            ].iter().map(|&s| s.to_string()).collect(),
+        }
     }
 }
 

@@ -1,0 +1,37 @@
+[package]
+name = "nexus-runtime"
+version = "0.1.0"
+edition = "2021"
+authors = ["NexusShell Team <info@nexusshell.com>"]
+description = "OCI-compatible low-level container runtime for NexusContainer"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "nexus-runtime"
+path = "src/main.rs"
+
+[dependencies]
+libnexuscontainer = { path = "../libnexuscontainer" }
+
+# CLI and argument parsing
+clap = { version = "4.0", features = ["derive"] }
+env_logger = "0.10"
+log = "0.4"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# File and path utilities
+tempfile = "3.6"
+
+# System interaction
+nix = { version = "0.28.0", features = ["mount", "sched", "signal", "process"] }
+libc = "0.2.155"
+
+# Additional dependencies
+anyhow = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+caps = "0.5.5" 

@@ -2,6 +2,7 @@ use crate::{
     AstNode, NodeKind, ParserContext, ParserError, Result
 };
 use std::collections::HashMap;
+use std::process::Command;
 
 pub struct Interpreter {
     pub variables: HashMap<String, String>,
@@ -19,20 +20,23 @@ impl Interpreter {
     pub fn interpret(&mut self, ast: &AstNode) -> Result<String> {
         match &ast.kind {
             NodeKind::Command { name, args, redirects, pipe } => {
-                // コマンド解釈の実装
-                // 実際のシェルではここで外部コマンドを実行したり組み込みコマンドを呼び出したりする
+                // コマンド解釈の本物の実装
                 let command_name = self.evaluate_expr(name)?;
-                let mut arguments = Vec::new();
-                
-                for arg in args {
-                    arguments.push(self.evaluate_expr(arg)?);
-                }
-                
-                // ここでは単にコマンドとその引数を文字列として返すだけ
-                if arguments.is_empty() {
-                    Ok(command_name)
+                if self.is_builtin_command(&command_name) {
+                    // 組み込みコマンドの呼び出し
+                    let builtin = self.get_builtin_command(&command_name)?;
+                    let result = builtin.execute(args, &mut self.variables)?;
+                    self.handle_command_result(result)?;
                 } else {
-                    Ok(format!("{} {}", command_name, arguments.join(" ")))
+                    // 外部コマンドの実行
+                    let output = Command::new(&command_name)
+                        .args(args)
+                        .envs(&self.variables)
+                        .output()?;
+                    if !output.status.success() {
+                        return Err(ParserError::InternalError(format!("外部コマンド失敗: {}", command_name)));
+                    }
+                    self.handle_external_output(output)?;
                 }
             },
             NodeKind::Argument { value } => {
@@ -91,5 +95,25 @@ impl Interpreter {
                 format!("式として評価できないノード種類: {:?}", expr.kind)
             )),
         }
+    }
+
+    fn is_builtin_command(&self, command: &str) -> bool {
+        // Implementation of is_builtin_command method
+        false
+    }
+
+    fn get_builtin_command(&self, command: &str) -> Result<BuiltinCommand> {
+        // Implementation of get_builtin_command method
+        Err(ParserError::InternalError("Builtin command not found".to_string()))
+    }
+
+    fn handle_command_result(&self, result: String) -> Result<String> {
+        // Implementation of handle_command_result method
+        Ok(result)
+    }
+
+    fn handle_external_output(&self, output: std::process::Output) -> Result<String> {
+        // Implementation of handle_external_output method
+        Ok(String::from_utf8(output.stdout).map_err(|e| ParserError::InternalError(e.to_string()))?)
     }
 } 

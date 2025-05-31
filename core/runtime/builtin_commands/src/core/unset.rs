@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use anyhow::{Result, anyhow};
 use clap::{Arg, ArgAction, Command};
+use std::sync::Arc;
+use std::io::Write;
 
 use crate::BuiltinCommand;
 
@@ -85,15 +87,19 @@ impl BuiltinCommand for UnsetCommand {
         
         // 各名前に対して処理
         for name in names {
-            // 関数モードの場合
             if is_function && !is_variable {
-                // 実際のシェルでは関数テーブルから関数を削除
-                // ここではメッセージを追加
+                if let Some(func_table) = &context.function_table {
+                    #[cfg(feature = "async")] {
+                        let mut table = func_table.write().await;
+                        table.remove(&name);
+                    }
+                    #[cfg(not(feature = "async"))] {
+                        let mut table = func_table.lock().unwrap();
+                        table.remove(&name);
+                    }
+                }
                 result.push_str(&format!("関数 '{}' を削除しました\n", name));
-            } 
-            // 変数モードまたはデフォルト
-            else {
-                // 環境変数を削除
+            } else {
                 env.remove(&name);
                 if is_variable {
                     result.push_str(&format!("変数 '{}' を削除しました\n", name));

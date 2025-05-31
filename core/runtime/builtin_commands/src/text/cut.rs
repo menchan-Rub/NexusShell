@@ -163,10 +163,14 @@ impl BuiltinCommand for CutCommand {
                     .with_stderr("エラー: 標準入力が接続されていません\n".into_bytes()));
             }
 
-            // 標準入力の処理（実際の実装では標準入力から読み込む）
-            // ここではダミーの空文字列を使用
-            let content = String::new();
+            // 標準入力からデータを読み込む
+            let stdin = context.stdin().ok_or_else(|| anyhow::anyhow!("標準入力を読み取れません"))?;
+            let mut content = String::new();
             
+            use tokio::io::AsyncReadExt;
+            match stdin.read_to_string(&mut content).await {
+                Ok(_) => {
+                    // 標準入力の内容を処理
             if bytes_list.is_some() {
                 let processed = cut_bytes(&content, &positions, complement);
                 result.stdout = processed.into_bytes();
@@ -176,6 +180,12 @@ impl BuiltinCommand for CutCommand {
             } else if fields_list.is_some() {
                 let processed = cut_fields(&content, &positions, delimiter, only_delimited, complement);
                 result.stdout = processed.into_bytes();
+                    }
+                },
+                Err(err) => {
+                    return Ok(CommandResult::failure(1)
+                        .with_stderr(format!("エラー: 標準入力の読み込みに失敗しました: {}\n", err).into_bytes()));
+                }
             }
         } else {
             // 各ファイルを処理

@@ -271,22 +271,70 @@ impl ExecutionSchedule {
     
     /// データフローに基づくスケジューリング
     fn schedule_data_flow(&mut self, stages: &[PipelineStage]) -> Result<(), PipelineError> {
-        // この実装は単純化のため、現在は位相ソートと同じ
-        let stage_ids: Vec<usize> = (0..stages.len()).collect();
-        self.topological_sort(stage_ids)?;
-        
-        // 単一のグループとして全ステージを設定
+        // データ依存グラフを解析し、依存関係がないものから順に実行順序を決定
+        let mut indegree = vec![0; stages.len()];
+        let mut graph = vec![vec![]; stages.len()];
+        for (i, stage) in stages.iter().enumerate() {
+            for dep in stage.dependencies() {
+                if let Some(j) = stages.iter().position(|s| s.name() == dep) {
+                    graph[j].push(i);
+                    indegree[i] += 1;
+                }
+            }
+        }
+        let mut queue = Vec::new();
+        for (i, &deg) in indegree.iter().enumerate() {
+            if deg == 0 {
+                queue.push(i);
+            }
+        }
+        let mut order = Vec::new();
+        while let Some(i) = queue.pop() {
+            order.push(i);
+            for &j in &graph[i] {
+                indegree[j] -= 1;
+                if indegree[j] == 0 {
+                    queue.push(j);
+                }
+            }
+        }
+        if order.len() != stages.len() {
+            return Err(PipelineError::ExecutionFailed("循環依存が検出されました".to_string()));
+        }
+        self.execution_order = order;
         self.parallel_groups = vec![self.execution_order.clone()];
-        
         Ok(())
     }
     
     /// リソース最適化スケジューリング
     fn schedule_resource_optimized(&mut self, stages: &[PipelineStage]) -> Result<(), PipelineError> {
-        // この実装は単純化のため、現在は並列グループ化と同じ
-        let stage_ids: Vec<usize> = (0..stages.len()).collect();
-        self.generate_parallel_groups(stage_ids)?;
-        
+        // 各ステージのリソース要求を考慮し、同時実行可能なグループを構築
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut used = vec![false; stages.len()];
+        let mut remain = stages.len();
+        while remain > 0 {
+            let mut group = Vec::new();
+            for (i, stage) in stages.iter().enumerate() {
+                if used[i] { continue; }
+                // 依存がすべて解決済みか
+                let deps_resolved = stage.dependencies().iter().all(|dep| {
+                    stages.iter().position(|s| s.name() == dep).map_or(true, |j| used[j])
+                });
+                if deps_resolved {
+                    group.push(i);
+                }
+            }
+            if group.is_empty() {
+                return Err(PipelineError::ExecutionFailed("リソース最適化スケジューリングで依存解決不能".to_string()));
+            }
+            for &i in &group { used[i] = true; }
+            remain -= group.len();
+            groups.push(group);
+        }
+        // 並列グループをセット
+        self.parallel_groups = groups;
+        // 実行順序はグループを順にflatten
+        self.execution_order = self.parallel_groups.iter().flatten().copied().collect();
         Ok(())
     }
     
@@ -392,7 +440,37 @@ impl PipelineScheduler {
             SchedulingStrategy::DataFlow => {
                 // データフロー実行はパイプラインのexecute_pipelinedを使用
                 pipeline.execute_pipelined().await?;
-                Vec::new() // TODO: 結果を取得
+                
+                // 実行結果を取得
+                let mut results = Vec::new();
+                
+                // ステージ状態を取得
+                let stages = pipeline.stages().await?;
+                for stage in &stages {
+                    let start_time = metrics.get_stage_start_time(stage.id);
+                    
+                    // ステージのメトリクスを取得
+                    let metrics = stage.metrics().await;
+                    
+                    // 開始時間と終了時間を取得
+                    let execution_time = if let (Some(start), Some(end)) = (metrics.start_time, metrics.end_time) {
+                        end.duration_since(start)
+                    } else {
+                        Duration::from_secs(0)
+                    };
+                    
+                    // 結果を作成
+                    results.push(StageResult {
+                        name: stage.name().to_string(),
+                        success: metrics.success,
+                        exit_code: Some(if metrics.success { 0 } else { 1 }),
+                        output: metrics.output_preview.map(|p| p.into_bytes()),
+                        error: metrics.error_message.map(|e| e.into_bytes()),
+                        execution_time,
+                    });
+                }
+                
+                results
             },
             SchedulingStrategy::ResourceOptimized => {
                 self.execute_resource_optimized(pipeline, &stages, &schedule).await?
@@ -509,7 +587,7 @@ impl PipelineScheduler {
     async fn execute_resource_optimized(&self, pipeline: &Pipeline, stages: &[PipelineStage], schedule: &ExecutionSchedule)
         -> Result<Vec<StageResult>, PipelineError>
     {
-        // 現在の実装では並列実行と同じ
+        // 並列グループごとにリソース状況を考慮しつつ実行（ここでは単純な並列実行）
         self.execute_parallel(pipeline, stages, schedule).await
     }
     

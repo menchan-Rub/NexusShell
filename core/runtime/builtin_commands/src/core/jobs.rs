@@ -183,6 +183,70 @@ impl JobsCommand {
         
         result
     }
+    
+    /// 現在のジョブID（%+または%%に対応）を見つける
+    fn find_current_job_id(&self) -> usize {
+        let jobs = self.mock_jobs();
+        jobs.iter()
+            .find(|job| job.is_current)
+            .map(|job| job.id)
+            .unwrap_or(0)
+    }
+    
+    /// 前のジョブID（%-に対応）を見つける
+    fn find_previous_job_id(&self) -> usize {
+        let jobs = self.mock_jobs();
+        jobs.iter()
+            .find(|job| job.is_previous)
+            .map(|job| job.id)
+            .unwrap_or(0)
+    }
+    
+    /// 特定のジョブIDのみを表示
+    fn display_specific_jobs(&self, job_ids: &[usize], show_pids: bool, no_status: bool) -> String {
+        let jobs = self.mock_jobs();
+        let filtered_jobs: Vec<_> = jobs.iter()
+            .filter(|job| job_ids.contains(&job.id))
+            .collect();
+            
+        if filtered_jobs.is_empty() {
+            return "指定されたジョブは存在しません。".to_string();
+        }
+        
+        let mut result = String::new();
+        
+        for job in filtered_jobs {
+            let status = match job.state {
+                JobState::Running => "実行中",
+                JobState::Stopped => "停止",
+                JobState::Done => "完了",
+            };
+            
+            let current_marker = if job.is_current {
+                "+"
+            } else if job.is_previous {
+                "-"
+            } else {
+                " "
+            };
+            
+            if show_pids {
+                if no_status {
+                    result.push_str(&format!("[{}]{} {}\n", job.id, current_marker, job.pid));
+                } else {
+                    result.push_str(&format!("[{}]{} {} {}\n", job.id, current_marker, status, job.pid));
+                }
+            } else {
+                if no_status {
+                    result.push_str(&format!("[{}]{} {}\n", job.id, current_marker, job.command));
+                } else {
+                    result.push_str(&format!("[{}]{} {} {}\n", job.id, current_marker, status, job.command));
+                }
+            }
+        }
+        
+        result
+    }
 }
 
 impl BuiltinCommand for JobsCommand {
@@ -212,10 +276,27 @@ impl BuiltinCommand for JobsCommand {
         let stopped_only = matches.get_flag("stopped");
         let no_status = matches.get_flag("no_status");
         
-        // 特定のジョブIDが指定されているか確認
-        if let Some(_job_ids) = matches.get_many::<String>("job_ids") {
-            // 実際の実装ではここでジョブIDをフィルタリング
-            // この実装では無視してすべて表示
+        // ジョブIDでフィルタリング
+        let job_ids: Vec<usize> = matches.get_many::<String>("job_ids").map(|ids| {
+            ids.map(|id_str| {
+                // %数字 形式か、単なる数字か、%+, %-形式をサポート
+                let id_str = id_str.trim();
+                if id_str.starts_with('%') {
+                    match &id_str[1..] {
+                        "+" | "%" => self.find_current_job_id(),  // 現在のジョブ
+                        "-" => self.find_previous_job_id(),      // 一つ前のジョブ
+                        num => num.parse::<usize>().unwrap_or(0),
+                    }
+                } else {
+                    // 数字だけの場合もジョブID
+                    id_str.parse::<usize>().unwrap_or(0)
+                }
+            }).filter(|&id| id > 0).collect::<Vec<_>>()
+        }).unwrap_or_default();
+
+        // 指定されたジョブIDのみを表示
+        if !job_ids.is_empty() {
+            return self.display_specific_jobs(&job_ids, show_pids, no_status);
         }
         
         // ジョブ情報の表示

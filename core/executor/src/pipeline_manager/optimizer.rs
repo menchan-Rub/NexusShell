@@ -410,30 +410,135 @@ impl PipelineOptimizer {
     /// データローカリティ最適化の適用
     fn apply_data_locality(&self, plan: &mut PipelinePlan, stats: &mut OptimizationStats) -> Result<(), PipelineError> {
         debug!("データローカリティ最適化を適用");
-        
-        // この実装は簡易的なもの
+
+        // 依存関係が強いステージ同士に同じノード割当を推奨
+        let stages = plan.stages().to_vec();
+        let mut node_affinity_map: HashMap<String, String> = HashMap::new();
+        let mut next_node_id = 0;
+        let mut new_stages = Vec::new();
+
+        for stage in &stages {
+            let mut assigned_node = None;
+            // 依存先のノード割当を優先
+            for dep in stage.dependencies() {
+                if let Some(node) = node_affinity_map.get(dep) {
+                    assigned_node = Some(node.clone());
+                    break;
+                }
+            }
+            // 割当がなければ新規ノードID
+            let node_id = assigned_node.unwrap_or_else(|| {
+                let id = format!("node-{}", next_node_id);
+                next_node_id += 1;
+                id
+            });
+            node_affinity_map.insert(stage.name().to_string(), node_id.clone());
+            // configにnode_affinityを付与
+            let mut new_stage = stage.clone();
+            new_stage = new_stage.with_config("node_affinity", node_id);
+            new_stages.push(new_stage);
+        }
+
+        // プランを更新
+        let mut new_plan = PipelinePlan::new(plan.id().to_string());
+        if let Some(name) = plan.name() {
+            new_plan = new_plan.with_name(name.to_string());
+        }
+        for stage in new_stages {
+            new_plan.add_stage(stage);
+        }
+        for (key, value) in plan.get_metadata("*").unwrap_or_default() {
+            new_plan.set_metadata(key, value);
+        }
+        *plan = new_plan;
         stats.data_locality_optimizations += 1;
-        
         Ok(())
     }
     
     /// リソース制約の適用
     fn apply_resource_constraints(&self, plan: &mut PipelinePlan, stats: &mut OptimizationStats) -> Result<(), PipelineError> {
         debug!("リソース制約最適化を適用");
-        
-        // この実装は簡易的なもの
+        let stages = plan.stages().to_vec();
+        let mut new_stages = Vec::new();
+        for stage in &stages {
+            let mut new_stage = stage.clone();
+            match stage.stage_type() {
+                StageType::Command(cmd) => {
+                    // コマンド名からリソース要求を推定（簡易）
+                    let cmd_lower = cmd.to_lowercase();
+                    if cmd_lower.contains("sort") {
+                        new_stage = new_stage.with_config("memory_limit", "256000000"); // 256MB
+                        new_stage = new_stage.with_config("cpu_limit", "0.8"); // 80%
+                    } else if cmd_lower.contains("grep") || cmd_lower.contains("find") {
+                        new_stage = new_stage.with_config("memory_limit", "64000000"); // 64MB
+                        new_stage = new_stage.with_config("cpu_limit", "0.5"); // 50%
+                    } else {
+                        new_stage = new_stage.with_config("memory_limit", "32000000"); // 32MB
+                        new_stage = new_stage.with_config("cpu_limit", "0.2"); // 20%
+                    }
+                },
+                StageType::Map(_) | StageType::Filter(_) => {
+                    new_stage = new_stage.with_config("memory_limit", "16000000"); // 16MB
+                    new_stage = new_stage.with_config("cpu_limit", "0.1"); // 10%
+                },
+                _ => {}
+            }
+            new_stages.push(new_stage);
+        }
+        // プランを更新
+        let mut new_plan = PipelinePlan::new(plan.id().to_string());
+        if let Some(name) = plan.name() {
+            new_plan = new_plan.with_name(name.to_string());
+        }
+        for stage in new_stages {
+            new_plan.add_stage(stage);
+        }
+        for (key, value) in plan.get_metadata("*").unwrap_or_default() {
+            new_plan.set_metadata(key, value);
+        }
+        *plan = new_plan;
         stats.resource_constraints_applied += 1;
-        
         Ok(())
     }
     
     /// 最終調整
     fn apply_final_tuning(&self, plan: &mut PipelinePlan, stats: &mut OptimizationStats) -> Result<(), PipelineError> {
         debug!("最終最適化調整を適用");
-        
-        // この実装は簡易的なもの
+        // コストやリソース割当のバランスを再評価し、必要に応じて微調整
+        let mut new_stages = Vec::new();
+        for stage in plan.stages() {
+            let mut new_stage = stage.clone();
+            // 例: 並列度が高すぎる場合は制限
+            if let Some(par) = stage.config().get("parallelism") {
+                if let Ok(p) = par.parse::<usize>() {
+                    if p > 4 {
+                        new_stage = new_stage.with_config("parallelism", "4");
+                    }
+                }
+            }
+            // 例: メモリ制限が極端に小さい場合は最低値を保証
+            if let Some(mem) = stage.config().get("memory_limit") {
+                if let Ok(m) = mem.parse::<u64>() {
+                    if m < 8000000 {
+                        new_stage = new_stage.with_config("memory_limit", "8000000"); // 8MB
+                    }
+                }
+            }
+            new_stages.push(new_stage);
+        }
+        // プランを更新
+        let mut new_plan = PipelinePlan::new(plan.id().to_string());
+        if let Some(name) = plan.name() {
+            new_plan = new_plan.with_name(name.to_string());
+        }
+        for stage in new_stages {
+            new_plan.add_stage(stage);
+        }
+        for (key, value) in plan.get_metadata("*").unwrap_or_default() {
+            new_plan.set_metadata(key, value);
+        }
+        *plan = new_plan;
         stats.final_tunings_applied += 1;
-        
         Ok(())
     }
     

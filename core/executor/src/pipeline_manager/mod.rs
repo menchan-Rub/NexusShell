@@ -466,5 +466,75 @@ impl Default for PipelineManager {
 /// PipelineOptionsの構造体を定義
 #[derive(Debug, Clone, Default)]
 pub struct PipelineOptions {
-    // オプション設定
+    /// 実行タイムアウト（秒）
+    pub timeout_sec: Option<u64>,
+    /// 同時実行可能なステージ数
+    pub max_parallel_stages: usize,
+    /// ステージ間のバッファサイズ
+    pub stage_buffer_size: usize,
+    /// 失敗時の再試行回数
+    pub retry_count: u32,
+    /// 再試行間隔（ミリ秒）
+    pub retry_interval_ms: u64,
+    /// エラー時に中断するかどうか
+    pub abort_on_error: bool,
+    /// ログレベル
+    pub log_level: LogLevel,
+    /// 実行モード
+    pub execution_mode: ExecutionMode,
+    /// カスタム環境変数
+    pub env_vars: std::collections::HashMap<String, String>,
+    /// 実行ランタイム設定
+    pub runtime_config: RuntimeConfig,
+}
+
+/// パイプラインログレベル
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    /// トレースレベル（最も詳細）
+    Trace,
+    /// デバッグレベル
+    Debug,
+    /// 情報レベル
+    Info,
+    /// 警告レベル
+    Warn,
+    /// エラーレベル
+    Error,
+}
+
+impl Default for LogLevel {
+    fn default() -> Self {
+        Self::Info
+    }
+}
+
+/// 実行モード
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// 順次実行
+    Sequential,
+    /// パイプライン実行
+    Pipelined,
+    /// 並列実行
+    Parallel,
+}
+
+impl Default for ExecutionMode {
+    fn default() -> Self {
+        Self::Pipelined
+    }
+}
+
+/// ランタイム設定
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeConfig {
+    /// スレッドプール設定
+    pub thread_pool_size: Option<usize>,
+    /// I/Oワーカー数
+    pub io_worker_count: Option<usize>,
+    /// メモリ使用量制限（バイト）
+    pub memory_limit: Option<u64>,
+    /// CPUアフィニティ設定
+    pub cpu_affinity: Option<Vec<usize>>,
 } 

@@ -1,6 +1,6 @@
 // src/ui/panes.rs - NexusShellのペイン管理
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseButton};
 use tui::{
     backend::Backend,
     layout::Rect,
@@ -59,6 +59,8 @@ pub struct Pane {
     last_exit_code: Option<i32>,
     // 追加: バックグラウンドジョブ
     background_jobs: Vec<JobInfo>,
+    // 追加: 最後の描画領域
+    last_render_area: Option<Rect>,
 }
 
 /// ジョブ情報
@@ -157,6 +159,7 @@ impl PaneManager {
             env_vars: HashMap::new(),
             last_exit_code: None,
             background_jobs: Vec::new(),
+            last_render_area: None,
         };
         
         self.panes.push(pane);
@@ -219,7 +222,38 @@ impl PaneManager {
     /// マウスイベント処理
     pub fn handle_mouse(&mut self, event: MouseEvent) {
         // マウスクリックでペイン選択
-        // 実際の実装では、ペインの位置情報をもとにどのペインがクリックされたかを判定する
+        if let MouseEvent::Down(MouseButton::Left, x, y, _) = event {
+            // クリック位置からどのペインがクリックされたかを判定
+            if let Some(pane_index) = self.find_pane_at(x, y) {
+                // すでにアクティブなペインの場合は何もしない
+                if pane_index == self.active_index {
+                    return;
+                }
+                
+                // ペインをアクティブにする
+                self.set_active_pane(pane_index);
+            }
+        }
+        // 現在アクティブなペインにイベントを転送
+        if !self.panes.is_empty() {
+            let pane = &mut self.panes[self.active_index];
+            pane.handle_mouse_event(event);
+        }
+    }
+    
+    /// 指定された座標にあるペインのインデックスを取得
+    fn find_pane_at(&self, x: u16, y: u16) -> Option<usize> {
+        // 各ペインの領域を確認し、座標が含まれるペインを返す
+        for (index, pane) in self.panes.iter().enumerate() {
+            if let Some(area) = pane.last_render_area {
+                // ペインの表示領域内かどうかを判定
+                if x >= area.x && x < area.x + area.width &&
+                   y >= area.y && y < area.y + area.height {
+                    return Some(index);
+                }
+            }
+        }
+        None
     }
     
     /// キー入力処理
@@ -558,13 +592,16 @@ impl PaneManager {
     }
     
     /// UI描画
-    pub fn render<B: Backend>(&self, frame: &mut Frame<B>, areas: &[Rect], theme_manager: &ThemeManager) {
+    pub fn render<B: Backend>(&mut self, frame: &mut Frame<B>, areas: &[Rect], theme_manager: &ThemeManager) {
         for (i, area) in areas.iter().enumerate() {
             if i >= self.panes.len() {
                 break;
             }
             
-            let pane = &self.panes[i];
+            let pane = &mut self.panes[i];
+            
+            // 描画領域を保存
+            pane.last_render_area = Some(*area);
             
             // ペインのタイトルにプロンプト情報を追加
             let title = format!("{} [{}]", 
@@ -645,6 +682,56 @@ impl PaneManager {
                     );
                 }
             }
+        }
+    }
+}
+
+impl Pane {
+    /// マウスイベントを処理
+    pub fn handle_mouse_event(&mut self, event: MouseEvent) {
+        match event {
+            MouseEvent::Down(MouseButton::Left, x, y, _) => {
+                // ペイン内の座標に変換
+                if let Some(area) = self.last_render_area {
+                    let relative_x = x.saturating_sub(area.x);
+                    let relative_y = y.saturating_sub(area.y);
+                    
+                    // 入力部分のクリック処理
+                    let input_area_y = area.height.saturating_sub(2);
+                    if relative_y == input_area_y {
+                        // 現在の入力行上でのクリック
+                        let prompt_len = 2; // "> " のサイズ
+                        if relative_x >= prompt_len {
+                            let content_x = relative_x.saturating_sub(prompt_len);
+                            // 文字位置の計算（簡易実装、マルチバイト文字の対応は省略）
+                            self.cursor_position = content_x.min(self.current_input.len() as u16) as usize;
+                        }
+                    } else if relative_y < input_area_y {
+                        // コンテンツ部分でのスクロール操作（クリックした位置に応じてスクロール）
+                        let content_lines = self.content.len();
+                        let visible_lines = area.height.saturating_sub(3) as usize;
+                        
+                        if content_lines > visible_lines {
+                            let scroll_ratio = relative_y as f32 / input_area_y as f32;
+                            let scroll_position = ((content_lines - visible_lines) as f32 * scroll_ratio) as usize;
+                            self.scroll_offset = (content_lines - visible_lines).saturating_sub(scroll_position);
+                        }
+                    }
+                }
+            },
+            MouseEvent::ScrollDown(_, _, _) => {
+                // 下にスクロール（スクロールオフセットを減らす）
+                if self.scroll_offset > 0 {
+                    self.scroll_offset -= 1;
+                }
+            },
+            MouseEvent::ScrollUp(_, _, _) => {
+                // 上にスクロール（スクロールオフセットを増やす）
+                if self.scroll_offset < self.content.len() {
+                    self.scroll_offset += 1;
+                }
+            },
+            _ => {} // その他のマウスイベントは無視
         }
     }
 } 

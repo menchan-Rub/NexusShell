@@ -102,9 +102,30 @@ impl BuiltinCommand for RmCommand {
 
                 // 対話モードの確認
                 if interactive {
-                    // 実際の実装では、ユーザーからの入力を求めますが
-                    // ここではテスト容易性のためにスキップして常にYesとします
-                    debug!("対話モード: ディレクトリ '{}' を削除しますか？ y/n", path_str);
+                    // ユーザーからの削除確認を求める
+                    let prompt = format!("ディレクトリ '{}' を削除しますか？ (y/n): ", path_str);
+                    let mut input = String::new();
+                    
+                    // 標準エラー出力に質問を出力（標準出力はリダイレクトされている可能性があるため）
+                    std::io::stderr().write_all(prompt.as_bytes()).ok();
+                    std::io::stderr().flush().ok();
+                    
+                    // 標準入力から回答を読み込む
+                    match io::stdin().read_line(&mut input) {
+                        Ok(_) => {
+                            let answer = input.trim().to_lowercase();
+                            if answer != "y" && answer != "yes" {
+                                debug!("ユーザーが削除を拒否しました: {}", path_str);
+                                continue; // 次のファイルへ
+                            }
+                        },
+                        Err(_) => {
+                            // 入力エラーの場合は安全のため削除しない
+                            let err_msg = format!("エラー: ユーザー入力の読み取りに失敗しました。'{}' の削除をスキップします。\n", path_str);
+                            result.stderr.extend_from_slice(err_msg.as_bytes());
+                            continue; // 次のファイルへ
+                        }
+                    }
                 }
 
                 match remove_dir_all(&path) {
@@ -122,8 +143,30 @@ impl BuiltinCommand for RmCommand {
             } else {
                 // ファイルの場合
                 if interactive {
-                    // 対話モードの確認（実際には入力を求める）
-                    debug!("対話モード: ファイル '{}' を削除しますか？ y/n", path_str);
+                    // ユーザーからの削除確認を求める
+                    let prompt = format!("ファイル '{}' を削除しますか？ (y/n): ", path_str);
+                    let mut input = String::new();
+                    
+                    // 標準エラー出力に質問を出力
+                    std::io::stderr().write_all(prompt.as_bytes()).ok();
+                    std::io::stderr().flush().ok();
+                    
+                    // 標準入力から回答を読み込む
+                    match io::stdin().read_line(&mut input) {
+                        Ok(_) => {
+                            let answer = input.trim().to_lowercase();
+                            if answer != "y" && answer != "yes" {
+                                debug!("ユーザーが削除を拒否しました: {}", path_str);
+                                continue; // 次のファイルへ
+                            }
+                        },
+                        Err(_) => {
+                            // 入力エラーの場合は安全のため削除しない
+                            let err_msg = format!("エラー: ユーザー入力の読み取りに失敗しました。'{}' の削除をスキップします。\n", path_str);
+                            result.stderr.extend_from_slice(err_msg.as_bytes());
+                            continue; // 次のファイルへ
+                        }
+                    }
                 }
 
                 match fs::remove_file(&path) {

@@ -191,69 +191,32 @@ impl ChmodCommand {
     
     /// 単一ファイルの権限を変更
     fn chmod_file(&self, path: &Path, mode: u32, verbose: bool) -> Result<()> {
-        // Windowsでの権限設定はUNIX互換層がないため実際には機能しない
         #[cfg(unix)]
         {
-            // ファイルのパーミッションを取得
-            let metadata = fs::metadata(path)?;
-            let mut permissions = metadata.permissions();
-            
-            // パーミッションを設定
-            permissions.set_mode(mode);
-            
-            // ファイルにパーミッションを適用
-            fs::set_permissions(path, permissions)?;
-        }
-        
-        #[cfg(not(unix))]
-        {
-            // Windows環境では警告メッセージを表示
-            println!("警告: Windows環境ではUNIX形式のファイル権限の変更は完全にはサポートされていません");
-            
-            // 読み取り専用属性のみ設定可能
-            let readonly = (mode & 0o222) == 0; // 書き込み権限がない場合
-            
-            let path_str = path.to_string_lossy();
-            
-            if readonly {
-                // ファイルを読み取り専用に設定
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::MetadataExt;
-                    let metadata = fs::metadata(path)?;
-                    let attributes = metadata.file_attributes();
-                    
-                    // FILE_ATTRIBUTE_READONLY (1)
-                    let new_attributes = attributes | 1;
-                    
-                    // attrib +R コマンドを使用
-                    std::process::Command::new("attrib")
-                        .arg("+R")
-                        .arg(&*path_str)
-                        .output()
-                        .context("attribコマンドの実行に失敗しました")?;
-                }
-            } else {
-                // 読み取り専用を解除
-                #[cfg(windows)]
-                {
-                    // attrib -R コマンドを使用
-                    std::process::Command::new("attrib")
-                        .arg("-R")
-                        .arg(&*path_str)
-                        .output()
-                        .context("attribコマンドの実行に失敗しました")?;
-                }
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(path, perms)?;
+            if verbose {
+                println!("{} のパーミッションを {:o} に変更しました", path.display(), mode);
             }
+            Ok(())
         }
-        
-        if verbose {
-            println!("モード = {} に変更: {}", 
-                     format!("{:o}", mode), 
-                     path.display());
+        #[cfg(windows)]
+        {
+            use std::process::Command;
+            let output = Command::new("icacls")
+                .arg(path)
+                .arg("/grant")
+                .arg(format!("Everyone:F"))
+                .output()?;
+            if !output.status.success() {
+                return Err(anyhow::anyhow!("icaclsコマンド失敗: {}", String::from_utf8_lossy(&output.stderr)));
+            }
+            if verbose {
+                println!("{} の権限を変更しました (Windows)", path.display());
+            }
+            Ok(())
         }
-        
-        Ok(())
     }
 }
 

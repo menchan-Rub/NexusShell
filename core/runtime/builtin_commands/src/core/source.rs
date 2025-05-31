@@ -5,6 +5,9 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, Context};
 use clap::{Arg, ArgAction, Command};
+use crate::parser::NexusParser;
+use crate::executor::NexusExecutor;
+use crate::CommandResult;
 
 use crate::BuiltinCommand;
 
@@ -74,53 +77,36 @@ impl SourceCommand {
     }
     
     /// スクリプトファイルを実行
-    fn execute_script(&self, file_path: &Path, args: Vec<&str>, env: &mut HashMap<String, String>) -> Result<String> {
-        // ファイルがあるか確認
+    async fn execute_script(&self, file_path: &Path, args: Vec<&str>, env: &mut HashMap<String, String>, context: &CommandContext) -> Result<String> {
         if !file_path.exists() {
             return Err(anyhow!("ファイル '{}' が見つかりません", file_path.display()));
         }
-        
-        // ファイルを開く
         let file = File::open(file_path)
             .with_context(|| format!("ファイル '{}' を開けませんでした", file_path.display()))?;
-        
         let reader = BufReader::new(file);
+        let parser = NexusParser::new();
+        let executor = NexusExecutor::new();
         let mut output = String::new();
-        
-        // 実行時の引数を設定
         env.insert("0".to_string(), file_path.to_string_lossy().to_string());
         for (i, arg) in args.iter().enumerate() {
             env.insert((i + 1).to_string(), arg.to_string());
         }
         env.insert("#".to_string(), args.len().to_string());
-        
-        // スクリプトを1行ずつ読み込んで処理
-        // 実際のシェルでは、このコードはパーサーとエグゼキュータを呼び出す必要がある
         for (line_num, line_result) in reader.lines().enumerate() {
-            let line = line_result.with_context(|| format!("ファイル '{}' の行 {} の読み込みに失敗しました", file_path.display(), line_num + 1))?;
-            
-            // コメント行またはブランク行はスキップ
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            
-            // 変数代入を処理
-            if let Some(pos) = trimmed.find('=') {
-                if !trimmed.contains(' ') || pos < trimmed.find(' ').unwrap_or(usize::MAX) {
-                    let (name, value) = trimmed.split_at(pos);
-                    let value = &value[1..];
-                    
-                    // 環境変数を設定
-                    env.insert(name.to_string(), value.to_string());
-                    continue;
+            let line = match line_result {
+                Ok(l) => l,
+                Err(e) => {
+                    return Err(anyhow!("source: {}行目の読み込みに失敗: {}", line_num + 1, e));
                 }
+            };
+            let ast = parser.parse_line(&line).map_err(|e| anyhow!("source: {}行目の構文エラー: {}", line_num + 1, e))?;
+            let exec_result = executor.execute_ast(&ast, context).await.map_err(|e| anyhow!("source: {}行目の実行エラー: {}", line_num + 1, e))?;
+            output.push_str(&exec_result.stdout_as_string());
+            // 環境変数の反映（例: export等）
+            for (k, v) in exec_result.env_changes.iter() {
+                env.insert(k.clone(), v.clone());
             }
-            
-            // モック用の単純な出力：実際には各行をパースして実行する必要がある
-            output.push_str(&format!("実行: {}\n", line));
         }
-        
         Ok(output)
     }
 }
@@ -158,7 +144,7 @@ impl BuiltinCommand for SourceCommand {
         let resolved_path = self.resolve_path(file_path, env)?;
         
         // スクリプトを実行
-        self.execute_script(&resolved_path, script_args, env)
+        self.execute_script(&resolved_path, script_args, env, &CommandContext::default())
     }
     
     fn help(&self) -> String {
@@ -221,7 +207,7 @@ mod tests {
         }
         
         // スクリプトを実行
-        let result = cmd.execute_script(&file_path, vec!["arg1", "arg2"], &mut env).unwrap();
+        let result = cmd.execute_script(&file_path, vec!["arg1", "arg2"], &mut env, &CommandContext::default()).unwrap();
         
         // スクリプトの実行結果を検証
         assert!(result.contains("実行: echo $TEST_VAR world"));

@@ -416,8 +416,146 @@ impl ContextAnalyzer {
 
     /// 変数参照の検証
     fn validate_variable_references(&self, result: &mut ContextAnalysisResult) {
-        // 未定義変数の検出など
-        // 実際の実装はもっと複雑になる可能性があります
+        // 未定義変数の検出
+        let mut defined_vars = HashSet::new();
+        let mut potential_uses = HashMap::new();
+        
+        // 1. まず、定義されている変数を収集
+        for cmd in &result.commands {
+            // 変数割り当てを追加
+            for var_name in cmd.assignments.keys() {
+                defined_vars.insert(var_name.clone());
+            }
+            
+            // export や declare コマンドの引数も変数定義とみなす
+            if cmd.name == "export" || cmd.name == "declare" || cmd.name == "typeset" {
+                for arg in &cmd.arguments {
+                    // name=value 形式を解析
+                    if let Some(pos) = arg.find('=') {
+                        let var_name = &arg[0..pos];
+                        defined_vars.insert(var_name.to_string());
+                    } else if !arg.starts_with('-') {
+                        // オプションでなければ変数名と見なす
+                        defined_vars.insert(arg.clone());
+                    }
+                }
+            }
+            
+            // local や readonly コマンドの引数も変数定義とみなす
+            if cmd.name == "local" || cmd.name == "readonly" {
+                for arg in &cmd.arguments {
+                    // name=value 形式を解析
+                    if let Some(pos) = arg.find('=') {
+                        let var_name = &arg[0..pos];
+                        defined_vars.insert(var_name.to_string());
+                    } else if !arg.starts_with('-') {
+                        defined_vars.insert(arg.clone());
+                    }
+                }
+            }
+        }
+        
+        // 環境変数の追加 (シェルでは通常利用可能)
+        for var in &["PATH", "HOME", "USER", "SHELL", "PWD", "OLDPWD", "HOSTNAME", 
+                    "PS1", "PS2", "PS3", "PS4", "LANG", "LC_ALL", "TERM", "DISPLAY"] {
+            defined_vars.insert(var.to_string());
+        }
+        
+        // シェル特殊変数の追加
+        for var in &["$", "?", "#", "*", "@", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+                    "BASH_VERSION", "SHELL_VERSION", "RANDOM", "LINENO", "SECONDS"] {
+            defined_vars.insert(var.to_string());
+        }
+        
+        // 2. 変数の使用を抽出 (コマンド引数、リダイレクション先など)
+        for (i, cmd) in result.commands.iter().enumerate() {
+            // 引数内の変数参照をチェック
+            for arg in &cmd.arguments {
+                self.extract_variable_refs(arg, &mut potential_uses, i);
+            }
+            
+            // オプション値内の変数参照をチェック
+            for (_, value) in cmd.options.iter().filter_map(|(k, v)| v.as_ref().map(|val| (k, val))) {
+                self.extract_variable_refs(value, &mut potential_uses, i);
+            }
+            
+            // リダイレクション先の変数参照をチェック
+            for redir in &cmd.redirections {
+                self.extract_variable_refs(&redir.target, &mut potential_uses, i);
+            }
+        }
+        
+        // 3. 未定義の変数使用を検出
+        for (var, positions) in potential_uses {
+            if !defined_vars.contains(&var) {
+                // 変数名が複数数字のみなら特殊パラメータと見なして無視
+                if var.chars().all(|c| c.is_digit(10)) {
+                    continue;
+                }
+                
+                for (cmd_idx, span) in positions {
+                    result.errors.push(ParserError::UndefinedVariable {
+                        message: format!("未定義の変数 '{}' が使用されています", var),
+                        var_name: var.clone(),
+                        span,
+                        command_index: cmd_idx,
+                    });
+                }
+            }
+        }
+    }
+    
+    /// 文字列から変数参照を抽出
+    fn extract_variable_refs(
+        &self,
+        text: &str,
+        refs: &mut HashMap<String, Vec<(usize, Span)>>,
+        cmd_idx: usize
+    ) {
+        let mut pos = 0;
+        
+        while let Some(dollar_pos) = text[pos..].find('$') {
+            let var_start = pos + dollar_pos;
+            pos = var_start + 1;
+            
+            if pos >= text.len() {
+                break;
+            }
+            
+            // ${var} 形式の変数
+            if text.chars().nth(pos) == Some('{') {
+                if let Some(end_brace) = text[pos..].find('}') {
+                    let var_name = &text[pos+1..pos+end_brace];
+                    let var_span = Span::new(var_start as u32, (pos + end_brace + 1) as u32);
+                    
+                    refs.entry(var_name.to_string())
+                        .or_insert_with(Vec::new)
+                        .push((cmd_idx, var_span));
+                    
+                    pos += end_brace + 1;
+                } else {
+                    // 閉じブレースがない不正な形式
+                    pos += 1;
+                }
+            } 
+            // $var 形式の変数
+            else if text.chars().nth(pos).map_or(false, |c| c.is_alphabetic() || c == '_') {
+                let var_end = text[pos..].find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .map_or(text.len(), |i| pos + i);
+                
+                let var_name = &text[pos..var_end];
+                let var_span = Span::new(var_start as u32, var_end as u32);
+                
+                refs.entry(var_name.to_string())
+                    .or_insert_with(Vec::new)
+                    .push((cmd_idx, var_span));
+                
+                pos = var_end;
+            } else if text.chars().nth(pos).map_or(false, |c| c == '(' || c == '$' || c == '?' || c == '#' || c == '*' || c == '@') {
+                // $($), $?, $#, $*, $@ のような特殊変数は無視
+                pos += 1;
+            }
+        }
     }
 
     /// コマンドの検証
@@ -466,7 +604,207 @@ impl ContextAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AstNode;
+    use crate::RedirectionKind as AstRedirectionKind;
     
     // テストケース
-    // 実際の実装ではここにテストを追加
+    #[test]
+    fn test_command_context_parsing() {
+        // 単純なコマンドのためのテスト用ASTを作成
+        let command = AstNode::Command {
+            name: "ls".to_string(),
+            args: vec![
+                AstNode::Argument { value: "-la".to_string(), span: Span::new(3, 6) },
+                AstNode::Argument { value: "/home".to_string(), span: Span::new(7, 12) },
+            ],
+            options: vec![],
+            redirects: vec![],
+            span: Span::new(0, 12),
+        };
+        
+        // 分析器を作成
+        let analyzer = ContextAnalyzer::new();
+        
+        // 分析を実行
+        let mut result = ContextAnalysisResult {
+            commands: Vec::new(),
+            pipelines: Vec::new(),
+            subshells: Vec::new(),
+            conditionals: Vec::new(),
+            loops: Vec::new(),
+            variable_references: HashMap::new(),
+            errors: Vec::new(),
+        };
+        analyzer.analyze_node(&command, &mut result);
+        
+        // 結果を検証
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].name, "ls");
+        assert_eq!(result.commands[0].arguments.len(), 2);
+        assert_eq!(result.commands[0].arguments[0], "-la");
+        assert_eq!(result.commands[0].arguments[1], "/home");
+    }
+    
+    #[test]
+    fn test_pipeline_context_parsing() {
+        // パイプラインを含むテスト用ASTを作成
+        let pipeline = AstNode::Pipeline {
+            commands: vec![
+                AstNode::Command {
+                    name: "grep".to_string(),
+                    args: vec![
+                        AstNode::Argument { value: "pattern".to_string(), span: Span::new(5, 12) },
+                        AstNode::Argument { value: "file.txt".to_string(), span: Span::new(13, 21) },
+                    ],
+                    options: vec![],
+                    redirects: vec![],
+                    span: Span::new(0, 21),
+                },
+                AstNode::Command {
+                    name: "wc".to_string(),
+                    args: vec![
+                        AstNode::Argument { value: "-l".to_string(), span: Span::new(26, 28) },
+                    ],
+                    options: vec![],
+                    redirects: vec![],
+                    span: Span::new(24, 28),
+                },
+            ],
+            pipe_types: vec![crate::PipelineKind::Standard],
+            span: Span::new(0, 28),
+        };
+        
+        // 分析器を作成
+        let analyzer = ContextAnalyzer::new();
+        
+        // 分析を実行
+        let mut result = ContextAnalysisResult {
+            commands: Vec::new(),
+            pipelines: Vec::new(),
+            subshells: Vec::new(),
+            conditionals: Vec::new(),
+            loops: Vec::new(),
+            variable_references: HashMap::new(),
+            errors: Vec::new(),
+        };
+        analyzer.analyze_node(&pipeline, &mut result);
+        
+        // 結果を検証
+        assert_eq!(result.commands.len(), 2);
+        assert_eq!(result.commands[0].name, "grep");
+        assert_eq!(result.commands[1].name, "wc");
+        assert_eq!(result.pipelines.len(), 1);
+        assert_eq!(result.pipelines[0].command_indices.len(), 2);
+    }
+    
+    #[test]
+    fn test_redirections_context_parsing() {
+        // リダイレクションを含むテスト用ASTを作成
+        let command = AstNode::Command {
+            name: "echo".to_string(),
+            args: vec![
+                AstNode::Argument { value: "Hello".to_string(), span: Span::new(5, 10) },
+            ],
+            options: vec![],
+            redirects: vec![
+                AstNode::Redirection {
+                    kind: AstRedirectionKind::StdoutOverwrite,
+                    target: "output.txt".to_string(),
+                    span: Span::new(11, 23),
+                },
+            ],
+            span: Span::new(0, 23),
+        };
+        
+        // 分析器を作成
+        let analyzer = ContextAnalyzer::new();
+        
+        // 分析を実行
+        let mut result = ContextAnalysisResult {
+            commands: Vec::new(),
+            pipelines: Vec::new(),
+            subshells: Vec::new(),
+            conditionals: Vec::new(),
+            loops: Vec::new(),
+            variable_references: HashMap::new(),
+            errors: Vec::new(),
+        };
+        analyzer.analyze_node(&command, &mut result);
+        
+        // 結果を検証
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].name, "echo");
+        assert_eq!(result.commands[0].redirections.len(), 1);
+        assert_eq!(result.commands[0].redirections[0].kind, RedirectionKind::StdoutOverwrite);
+        assert_eq!(result.commands[0].redirections[0].target, "output.txt");
+    }
+    
+    #[test]
+    fn test_variable_reference_detection() {
+        // 変数参照を含むテスト用ASTを作成
+        let command = AstNode::Command {
+            name: "echo".to_string(),
+            args: vec![
+                AstNode::VariableReference { 
+                    name: "HOME".to_string(), 
+                    span: Span::new(5, 11) 
+                },
+            ],
+            options: vec![],
+            redirects: vec![],
+            span: Span::new(0, 11),
+        };
+        
+        // 分析器を作成
+        let analyzer = ContextAnalyzer::new();
+        
+        // 分析を実行
+        let mut result = ContextAnalysisResult {
+            commands: Vec::new(),
+            pipelines: Vec::new(),
+            subshells: Vec::new(),
+            conditionals: Vec::new(),
+            loops: Vec::new(),
+            variable_references: HashMap::new(),
+            errors: Vec::new(),
+        };
+        analyzer.analyze_node(&command, &mut result);
+        
+        // 結果を検証
+        assert!(result.variable_references.contains_key("HOME"));
+        assert_eq!(result.variable_references["HOME"].len(), 1);
+    }
+    
+    #[test]
+    fn test_error_detection() {
+        // エラーを含むテスト用ASTを作成
+        let command = AstNode::Error {
+            message: "不正なシンタックス".to_string(),
+            span: Span::new(0, 10),
+        };
+        
+        // 分析器を作成
+        let analyzer = ContextAnalyzer::new();
+        
+        // 分析を実行
+        let mut result = ContextAnalysisResult {
+            commands: Vec::new(),
+            pipelines: Vec::new(),
+            subshells: Vec::new(),
+            conditionals: Vec::new(),
+            loops: Vec::new(),
+            variable_references: HashMap::new(),
+            errors: Vec::new(),
+        };
+        analyzer.analyze_node(&command, &mut result);
+        
+        // 結果を検証
+        assert_eq!(result.errors.len(), 1);
+        match &result.errors[0] {
+            ParserError::SyntaxError { message, .. } => {
+                assert_eq!(message, "不正なシンタックス");
+            },
+            _ => panic!("Expected SyntaxError"),
+        }
+    }
 } 

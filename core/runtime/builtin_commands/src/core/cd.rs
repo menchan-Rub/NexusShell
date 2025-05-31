@@ -108,22 +108,62 @@ impl BuiltinCommand for CdCommand {
         }
         
         // 現在のディレクトリを記録（OLDPWD環境変数として）
-        // 注: 実際のシェル環境で環境変数を設定するには、シェルに対して変更を通知する必要がある
         if let Ok(current_dir) = env::current_dir() {
             debug!("OLDPWD={}", current_dir.display());
-            // 環境変数の設定は、実際のシェル実装では、ここで行うのではなく
-            // コマンドの実行結果として返し、シェルに環境変数の更新を依頼します
+            // 親シェルに環境変数変更を通知するため、CommandResultに反映
+            let mut result = CommandResult::success();
+            result.env_changes.insert("OLDPWD".to_string(), current_dir.display().to_string());
+            // ディレクトリ変更
+            if let Err(e) = env::set_current_dir(&target_dir) {
+                return Ok(CommandResult::failure(1).with_stderr(format!("cd: ディレクトリ変更失敗: {}", e).into_bytes()));
+            }
+            result.next_working_dir = Some(target_dir.clone());
+            return Ok(result);
         }
         
-        // カレントディレクトリを変更
-        // 注: これはプロセス内でのみ有効。実際のシェルでは、戻り値を通じてシェルに
-        // ディレクトリ変更を通知する必要があります。
-        debug!("ディレクトリを変更: {}", target_dir.display());
+        // カレントディレクトリを変更し、シェル全体に伝播させる
+        // シェルプロセスとすべての子プロセスにディレクトリ変更を適用
+        if let Err(err) = env::set_current_dir(&target_dir) {
+            error!("ディレクトリ変更に失敗: {}", err);
+            return Ok(CommandResult::failure(1)
+                .with_stderr(format!("cd: {}: {}", target_dir.display(), err).into_bytes()));
+        }
+
+        // PWD環境変数を更新（絶対パスを使用）
+        let canonical_path = match fs::canonicalize(&target_dir) {
+            Ok(path) => path,
+            Err(_) => target_dir.clone(),  // 正規化に失敗した場合は元のパスを使用
+        };
         
-        // 実際には、シェルに変更を通知するためのデータを返す
-        let result = CommandResult::success()
-            .with_stdout(format!("{}", target_dir.display()).into_bytes());
+        // ディレクトリ変更の通知と環境変数の更新
+        let mut result = CommandResult::success();
+        result.env_changes.insert("PWD".to_string(), canonical_path.display().to_string());
+        result.next_working_dir = Some(target_dir.to_path_buf());
         
+        // ディレクトリスタックを更新（DIRSTACK環境変数があれば）
+        if let Ok(dir_stack) = env::var("DIRSTACK") {
+            let mut stack: Vec<String> = dir_stack.split(':')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+                
+            // 現在のディレクトリをスタックに追加（最大20エントリを維持）
+            if let Ok(current_dir) = env::current_dir() {
+                let current_path = current_dir.display().to_string();
+                if !stack.contains(&current_path) {
+                    stack.insert(0, current_path);
+                    if stack.len() > 20 {
+                        stack.truncate(20);
+                    }
+                    
+                    // 更新されたスタックを環境変数に設定
+                    let new_stack = stack.join(":");
+                    result.env_changes.insert("DIRSTACK".to_string(), new_stack);
+                }
+            }
+        }
+        
+        debug!("ディレクトリを変更: {} → 通知完了", target_dir.display());
         Ok(result)
     }
 }

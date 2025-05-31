@@ -11,26 +11,26 @@ pub enum TokenKind {
     Comment,
     
     // リテラル
-    Boolean,
-    Integer,
-    Float,
-    String,
-    Variable,
-    Identifier,
-    Flag,
+    Boolean,        // true, false
+    Integer,        // 123, 0o7, 0xff
+    Float,          // 1.23, .5, 1.
+    String,         // "abc", 'xyz'
+    Variable,       // $VAR, ${VAR}
+    Identifier,     // command_name, variable_name
+    Flag,           // --flag, -f
     
     // パイプライン関連
     Pipe,           // |
     PipeTyped,      // |>
-    PipeConditional, // ||
-    PipeParallel,   // &|
-    PipeError,      // |&
+    PipeConditional, // &&, ||
+    PipeParallel,   // &| (独自拡張の可能性)
+    PipeError,      // |& (bashでは stderr もパイプ)
     
     // リダイレクション
     RedirectOut,    // >
     RedirectAppend, // >>
     RedirectIn,     // <
-    RedirectMerge,  // >&
+    RedirectMerge,  // >& (bashでは &>)
     
     // 制御文字
     Ampersand,      // &
@@ -73,13 +73,13 @@ pub enum TokenKind {
     Question,       // ?
     
     // キーワード
-    If,
-    Else,
-    For,
-    While,
-    In,
-    Function,
-    Return,
+    If,             // if
+    Else,           // else
+    For,            // for
+    While,          // while
+    In,             // in
+    Function,       // function (bashでは function name() {} or name() {})
+    Return,         // return
     
     // 特殊トークン
     Eof,            // 入力の終わり

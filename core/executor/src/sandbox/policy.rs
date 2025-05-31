@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
+use caps::Capability;
+
 /// サンドボックスセキュリティポリシー
 /// サンドボックス内で許可される操作を定義します
 #[derive(Debug, Clone)]
@@ -15,6 +18,9 @@ pub struct SandboxPolicy {
     enable_seccomp: bool,
     /// 特権の降格を有効にするかどうか (capabilities)
     drop_capabilities: bool,
+    /// 保持するケイパビリティ (drop_capabilities が true の場合に適用)
+    #[cfg(target_os = "linux")]
+    kept_capabilities: HashSet<Capability>,
     /// 読み取りアクセスが許可されるパス
     allowed_read_paths: HashSet<PathBuf>,
     /// 書き込みアクセスが許可されるパス
@@ -40,6 +46,8 @@ impl SandboxPolicy {
             allow_process_execution: false,
             enable_seccomp: true,
             drop_capabilities: true,
+            #[cfg(target_os = "linux")]
+            kept_capabilities: Self::default_kept_capabilities(),
             allowed_read_paths: HashSet::new(),
             allowed_write_paths: HashSet::new(),
             allowed_exec_paths: HashSet::new(),
@@ -79,6 +87,12 @@ impl SandboxPolicy {
         policy.allow_network = true;
         policy.enable_seccomp = false;
         policy.drop_capabilities = false;
+        #[cfg(target_os = "linux")]
+        {
+            // リラックスしたポリシーでは全てのケイパビリティを保持 (空のセットではない)
+            // 全てのCapabilityを列挙するのは難しいため、ここでは主要なものをコメントアウト
+            // policy.kept_capabilities.clear(); // or add all known capabilities
+        }
         policy.allow_timezone_access = true;
         
         policy
@@ -132,6 +146,24 @@ impl SandboxPolicy {
     /// ケイパビリティをドロップするかどうかを設定します
     pub fn set_drop_capabilities(&mut self, drop: bool) {
         self.drop_capabilities = drop;
+    }
+
+    /// 保持するケイパビリティを取得します (Linuxのみ)
+    #[cfg(target_os = "linux")]
+    pub fn kept_capabilities(&self) -> &HashSet<Capability> {
+        &self.kept_capabilities
+    }
+
+    /// 保持するケイパビリティを追加します (Linuxのみ)
+    #[cfg(target_os = "linux")]
+    pub fn add_kept_capability(&mut self, cap: Capability) {
+        self.kept_capabilities.insert(cap);
+    }
+
+    /// 保持するケイパビリティをクリアします (Linuxのみ)
+    #[cfg(target_os = "linux")]
+    pub fn clear_kept_capabilities(&mut self) {
+        self.kept_capabilities.clear();
     }
 
     /// 読み取りアクセスが許可されるパスを取得します
@@ -324,6 +356,23 @@ impl SandboxPolicy {
         ].iter().cloned().collect();
         
         syscalls
+    }
+
+    /// デフォルトで保持するケイパビリティを取得します (Linuxのみ)
+    #[cfg(target_os = "linux")]
+    fn default_kept_capabilities() -> HashSet<Capability> {
+        // 通常のプロセスに必要な最小限のケイパビリティの例
+        // アプリケーションの要件に応じて調整が必要
+        let mut caps = HashSet::new();
+        // caps.insert(Capability::CAP_CHOWN);
+        // caps.insert(Capability::CAP_DAC_OVERRIDE); // 注意して使用
+        // caps.insert(Capability::CAP_FOWNER);
+        // caps.insert(Capability::CAP_NET_BIND_SERVICE); // 80, 443ポート等へのバインド
+        // caps.insert(Capability::CAP_SETGID);
+        // caps.insert(Capability::CAP_SETUID);
+        // caps.insert(Capability::CAP_SYS_CHROOT);
+        // caps.insert(Capability::CAP_KILL); // killシステムコール
+        caps
     }
 }
 

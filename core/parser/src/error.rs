@@ -23,11 +23,14 @@ pub enum ParserError {
     #[error("未実装: {0}")]
     NotImplemented(String),
     
-    #[error("予期しないトークン: 期待={expected:?}, 実際={actual:?} at {span}")]
+    #[error("予期しないトークンです (位置: {span})\n該当箇所: `{source_snippet}`\n期待したトークン: {expected:?} ({expected_type})\n実際のトークン: {actual:?} ({actual_type})")]
     UnexpectedToken {
         expected: String,
+        expected_type: String,
         actual: String,
+        actual_type: String,
         span: Span,
+        source_snippet: String,
     },
     
     #[error("未知のトークン: {0} at {1}")]
@@ -54,8 +57,15 @@ pub enum ParserError {
     #[error("コマンドが見つかりません: {0} at {1}")]
     CommandNotFound(String, Span),
     
-    #[error("型の不一致: {0} at {1}")]
-    TypeMismatch(String, Span),
+    #[error("型エラーが発生しました (位置: {span})\n該当箇所: `{source_snippet}`\n期待した型: {expected} ({expected_type})\n実際の型: {actual} ({actual_type})")]
+    TypeError {
+        expected: String,
+        expected_type: String,
+        actual: String,
+        actual_type: String,
+        span: Span,
+        source_snippet: String,
+    },
     
     #[error("エラーの連鎖: {0}")]
     ChainedError(Box<ParserError>),
@@ -83,7 +93,7 @@ impl ParserError {
             ParserError::SemanticError(msg, _) => msg.clone(),
             ParserError::NotImplemented(msg) => msg.clone(),
             ParserError::UnexpectedToken { expected, actual, .. } => 
-                format!("期待されるトークン: {}, 実際のトークン: {}", expected, actual),
+                format!("期待されたトークンは {} でしたが、実際には {} でした。", expected, actual),
             ParserError::UnknownToken(token, _) => format!("未知のトークン: {}", token),
             ParserError::InvalidCharacter(c, _) => format!("無効な文字: {}", c),
             ParserError::InvalidNumber(num, _) => format!("無効な数値: {}", num),
@@ -92,7 +102,7 @@ impl ParserError {
             ParserError::UndefinedVariable(name, _) => format!("未定義の変数: {}", name),
             ParserError::InvalidPath(path, _) => format!("無効なパス: {}", path),
             ParserError::CommandNotFound(cmd, _) => format!("コマンドが見つかりません: {}", cmd),
-            ParserError::TypeMismatch(msg, _) => format!("型の不一致: {}", msg),
+            ParserError::TypeError { expected, actual, .. } => format!("型が一致しません。期待された型は {} でしたが、実際の型は {} でした。", expected, actual),
             ParserError::ChainedError(e) => e.message(),
             ParserError::IoError(msg) => msg.clone(),
             ParserError::InternalError(msg) => msg.clone(),
@@ -115,7 +125,7 @@ impl ParserError {
             ParserError::UndefinedVariable(_, span) => Some(*span),
             ParserError::InvalidPath(_, span) => Some(*span),
             ParserError::CommandNotFound(_, span) => Some(*span),
-            ParserError::TypeMismatch(_, span) => Some(*span),
+            ParserError::TypeError { span, .. } => Some(*span),
             ParserError::ChainedError(e) => e.span(),
             _ => None,
         }
@@ -137,7 +147,7 @@ impl ParserError {
             ParserError::UndefinedVariable(_, _) => ErrorSeverity::Error,
             ParserError::InvalidPath(_, _) => ErrorSeverity::Error,
             ParserError::CommandNotFound(_, _) => ErrorSeverity::Error,
-            ParserError::TypeMismatch(_, _) => ErrorSeverity::Error,
+            ParserError::TypeError { .. } => ErrorSeverity::Error,
             ParserError::ChainedError(e) => e.severity(),
             ParserError::IoError(_) => ErrorSeverity::Fatal,
             ParserError::InternalError(_) => ErrorSeverity::Fatal,
@@ -482,7 +492,7 @@ impl ParserError {
             }
             ParserErrorKind::SemanticError { kind, .. } => match kind {
                 SemanticErrorKind::TypeMismatch { expected, actual } => {
-                    format!("{}: 期待される型: {}, 実際の型: {}", self.message(), expected, actual)
+                    format!("{} 期待される型: {}, 実際の型: {}", self.message(), expected, actual)
                 }
                 SemanticErrorKind::InvalidArgumentCount { expected, actual } => {
                     let expected_str = if expected.start == expected.end - 1 {
@@ -492,10 +502,10 @@ impl ParserError {
                     } else {
                         format!("{}から{}", expected.start, expected.end - 1)
                     };
-                    format!("{}: 期待される引数の数: {}, 実際の引数の数: {}", self.message(), expected_str, actual)
+                    format!("{} 期待される引数の数: {}, 実際の引数の数: {}", self.message(), expected_str, actual)
                 }
                 SemanticErrorKind::InvalidArgumentType { index, expected, actual } => {
-                    format!("{}: 引数 #{}: 期待される型: {}, 実際の型: {}", self.message(), index + 1, expected, actual)
+                    format!("{} 引数 #{}: 期待される型: {}, 実際の型: {}", self.message(), index + 1, expected, actual)
                 }
                 SemanticErrorKind::UndefinedOperator { operator, operand_types } => {
                     format!("{}: 演算子 '{}' は型 ({}) に対して定義されていません", 

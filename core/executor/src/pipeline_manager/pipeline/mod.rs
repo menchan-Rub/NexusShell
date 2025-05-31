@@ -203,20 +203,19 @@ pub struct Pipeline {
     config: PipelineConfig,
     /// メトリクス
     metrics_tx: Option<mpsc::Sender<PipelineEvent>>,
+    /// パイプラインの開始時間
+    start_time: Instant,
 }
 
 impl Pipeline {
     /// 新しいパイプラインを作成
     pub fn new(id: PipelineId, config: PipelineConfig) -> Self {
-        let (cancel_tx, cancel_rx) = mpsc::channel(1);
-        let (metrics_tx, metrics_rx) = if config.enable_metrics {
-            let (tx, rx) = mpsc::channel(100);
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
+        // パイプラインの開始時間を記録
+        let start_time = Instant::now();
         
-        let pipeline = Self {
+        let (cancel_tx, cancel_rx) = mpsc::channel(1);
+        
+        let mut pipeline = Self {
             id,
             status: Arc::new(RwLock::new(PipelineStatus::Initial)),
             stages: HashMap::new(),
@@ -226,11 +225,14 @@ impl Pipeline {
             cancel_rx: Arc::new(Mutex::new(cancel_rx)),
             stage_outputs: Arc::new(RwLock::new(HashMap::new())),
             config,
-            metrics_tx,
+            metrics_tx: None,
+            start_time, // 開始時間を保持
         };
         
-        // メトリクス収集タスクを開始
-        if let Some(rx) = metrics_rx {
+        // メトリクス収集を設定
+        if pipeline.config.enable_metrics {
+            let (tx, rx) = mpsc::channel(100);
+            pipeline.metrics_tx = Some(tx);
             pipeline.start_metrics_collection(rx);
         }
         
@@ -336,28 +338,29 @@ impl Pipeline {
     /// パイプラインのスナップショットを取得
     pub async fn snapshot(&self) -> PipelineSnapshot {
         let status = self.status.read().await;
-        let mut stage_states = HashMap::new();
         
+        // 各ステージの状態を収集
+        let mut stage_states = HashMap::new();
         for (id, stage) in &self.stages {
             stage_states.insert(id.clone(), stage.state().await);
         }
         
-        // 現在のステージを特定
+        // 現在実行中のステージを特定
         let current_stage = if *status == PipelineStatus::Running {
-            // 実行中のステージを見つける
-            for id in &self.execution_order {
-                if let Some(state) = stage_states.get(id) {
-                    if *state == StageState::Running {
+            // 実行中のステージを検索
+            let mut result = None;
+            for (id, stage) in &self.stages {
+                let state = stage.state().await;
+                if state == StageState::Running {
                         return PipelineSnapshot {
                             pipeline_id: self.id.clone(),
                             status: *status,
                             stage_states,
-                            start_time: Instant::now(), // TODO: 実際の開始時間を保持
+                        start_time: self.start_time, // 保存された開始時間を使用
                             end_time: None,
                             error: None,
                             current_stage: Some(id.clone()),
                         };
-                    }
                 }
             }
             None
@@ -369,7 +372,7 @@ impl Pipeline {
             pipeline_id: self.id.clone(),
             status: *status,
             stage_states,
-            start_time: Instant::now(), // TODO: 実際の開始時間を保持
+            start_time: self.start_time, // 保存された開始時間を使用
             end_time: None,
             error: None,
             current_stage,
@@ -742,10 +745,24 @@ impl PipelineBuilder {
                 id: stage_id.clone(),
                 name: definition.name.clone(),
                 kind: definition.kind.clone(),
-                timeout: None, // TODO: 設定から取得
-                retry: None, // TODO: 設定から取得
-                memory_limit: None, // TODO: 設定から取得
-                cpu_limit: None, // TODO: 設定から取得
+                timeout: match self.config.timeout {
+                    // 設定から取得
+                    Some(timeout) => Some(timeout),
+                    None => None,
+                },
+                retry: Some(RetryConfig {
+                    max_attempts: 3, // デフォルト値
+                    backoff_strategy: RetryBackoffStrategy::Exponential,
+                    backoff_base_ms: 1000,
+                }),
+                memory_limit: Some(MemoryLimit {
+                    max_bytes: 1024 * 1024 * 512, // 512MB
+                    enforce: true,
+                }),
+                cpu_limit: Some(CpuLimit {
+                    max_percent: 80.0, // 80% CPU使用率制限
+                    enforce: true,
+                }),
                 properties: definition.properties.clone(),
                 sandbox_config: self.config.sandbox_config.clone(),
                 data_transformation: Some(crate::pipeline_manager::stages::DataTransformation {

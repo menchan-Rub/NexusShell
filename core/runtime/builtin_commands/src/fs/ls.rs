@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error, warn};
+use chrono::{DateTime, Local};
+use clap::{App, Arg, ArgMatches};
+use colored::Colorize;
+use std::os::unix::fs::PermissionsExt;
+use std::time::SystemTime;
+use std::io;
 
 /// オプションフラグを表す構造体
 #[derive(Debug, Default)]
@@ -63,505 +69,602 @@ impl BuiltinCommand for LsCommand {
     }
 
     fn description(&self) -> &'static str {
-        "ディレクトリの内容をリスト表示します"
+        "ディレクトリの内容を表示します"
     }
 
     fn usage(&self) -> &'static str {
-        "ls [オプション]... [ファイル]...\n\n\
-        主なオプション:\n\
-        -a, --all                隠しファイルを含む全てのエントリを表示\n\
-        -A, --almost-all         '.'と'..'を除く全てのエントリを表示\n\
-        -l                       詳細な情報を表示\n\
-        -h, --human-readable     サイズを読みやすい形式で表示（例: 1K 234M 2G）\n\
-        -R, --recursive          サブディレクトリを再帰的に一覧表示\n\
-        -r, --reverse            ソート順を逆にする\n\
-        -S                       ファイルサイズでソート\n\
-        -t                       更新時刻でソート\n\
-        -F, --classify           ディレクトリには'/'、実行可能ファイルには'*'などを付加\n\
-        -1                       1行につき1エントリずつ表示\n\
-        --color[=WHEN]           カラー表示を使用 (always/never/auto)"
+        "ls [オプション]... [ファイル]..."
     }
 
     async fn execute(&self, context: CommandContext) -> Result<CommandResult> {
-        // 引数を取得（最初の引数はコマンド名なので、それ以降を使用）
-        let args = context.args.iter().skip(1).collect::<Vec<_>>();
-        
-        // オプションを解析
-        let (options, targets) = parse_options(&args)?;
-        
-        // 表示対象のパスを決定
-        let targets = if targets.is_empty() {
-            // 引数がなければカレントディレクトリを使用
-            vec![context.current_dir.clone()]
-        } else {
-            // 指定されたパスを現在のディレクトリからの相対パスとして解釈
-            targets.iter().map(|t| {
-                if Path::new(t).is_absolute() {
-                    PathBuf::from(t)
-                } else {
-                    context.current_dir.join(t)
-                }
-            }).collect()
+        // コマンドライン引数をパース
+        let matches = App::new("ls")
+            .about("ディレクトリの内容を表示します")
+            .arg(
+                Arg::with_name("all")
+                    .short('a')
+                    .long("all")
+                    .help(".(ドット)で始まるエントリも表示します")
+            )
+            .arg(
+                Arg::with_name("long")
+                    .short('l')
+                    .help("詳細情報を表示します")
+            )
+            .arg(
+                Arg::with_name("human-readable")
+                    .short('h')
+                    .help("ファイルサイズを読みやすい形式で表示します（例：1K 234M 2G）")
+            )
+            .arg(
+                Arg::with_name("size")
+                    .short('S')
+                    .help("ファイルサイズでソートします")
+            )
+            .arg(
+                Arg::with_name("time")
+                    .short('t')
+                    .help("更新日時でソートします")
+            )
+            .arg(
+                Arg::with_name("reverse")
+                    .short('r')
+                    .help("逆順でソートします")
+            )
+            .arg(
+                Arg::with_name("recursive")
+                    .short('R')
+                    .help("サブディレクトリを再帰的に表示します")
+            )
+            .arg(
+                Arg::with_name("directory")
+                    .short('d')
+                    .help("ディレクトリの内容ではなくディレクトリ自体を表示します")
+            )
+            .arg(
+                Arg::with_name("no-dereference")
+                    .short('P')
+                    .help("シンボリックリンクをたどりません")
+            )
+            .arg(
+                Arg::with_name("FILES")
+                    .help("表示するファイルやディレクトリ")
+                    .multiple(true)
+            )
+            .get_matches_from(context.args);
+
+        // オプションの解析
+        let options = LsOptions {
+            all: matches.is_present("all"),
+            long_format: matches.is_present("long"),
+            human_readable: matches.is_present("human-readable"),
+            sort_by_size: matches.is_present("size"),
+            sort_by_time: matches.is_present("time"),
+            reverse_sort: matches.is_present("reverse"),
+            recursive: matches.is_present("recursive"),
+            colorize: true,  // デフォルトで色付き表示
+            show_inode: false,
+            classify: false,
+            one_per_line: false,
+            almost_all: false,
+            list_directory_contents: false,
         };
+
+        // 表示対象のパスを取得（指定がなければカレントディレクトリ）
+        let paths: Vec<&str> = matches.values_of("FILES")
+            .map(|vals| vals.collect())
+            .unwrap_or_else(|| vec!["."].into_iter().collect());
+
+        // ls実行
+        let result = self.execute_ls(&paths, &options).await?;
         
-        // 結果を格納するバッファ
-        let mut output = Vec::new();
+        Ok(CommandResult::success(result.into_bytes()))
+    }
+}
+
+impl LsCommand {
+    /// ls コマンドを実行
+    async fn execute_ls(&self, paths: &[&str], options: &LsOptions) -> Result<String> {
+        let mut result = String::new();
+        let show_headers = paths.len() > 1 || options.recursive;
         
-        // 複数のディレクトリが指定された場合はディレクトリ名も表示
-        let show_directory_names = targets.len() > 1 || options.recursive;
-        
-        // 各ターゲットについて処理
-        for (i, target) in targets.iter().enumerate() {
-            // 複数のディレクトリがある場合は、2つ目以降の前に空行を挿入
+        for (i, path) in paths.iter().enumerate() {
             if i > 0 {
-                output.push(b'\n');
+                result.push_str("\n");
             }
             
-            // ディレクトリ名を表示
-            if show_directory_names {
-                let header = format!("{}:", target.display());
-                output.extend_from_slice(header.as_bytes());
-                output.push(b'\n');
+            if show_headers {
+                result.push_str(&format!("{}:\n", path));
             }
             
-            // ファイルの一覧を取得して表示
-            let result = list_directory(target, &options);
-            match result {
-                Ok(listing) => {
-                    output.extend_from_slice(listing.as_bytes());
-                }
-                Err(err) => {
-                    let error_message = format!("ls: {}: {}", target.display(), err);
-                    error!("{}", error_message);
-                    output.extend_from_slice(error_message.as_bytes());
-                    output.push(b'\n');
-                }
-            }
-            
-            // 再帰的に表示する場合
-            if options.recursive {
-                match list_recursive(target, &options) {
-                    Ok(recursive_listing) => {
-                        output.extend_from_slice(recursive_listing.as_bytes());
-                    }
-                    Err(err) => {
-                        let error_message = format!("ls: 再帰的なリスト表示中にエラーが発生しました: {}", err);
-                        error!("{}", error_message);
-                        output.extend_from_slice(error_message.as_bytes());
-                        output.push(b'\n');
-                    }
-                }
-            }
-        }
-        
-        // 最後に改行を追加（出力が空でない場合）
-        if !output.is_empty() && output.last() != Some(&b'\n') {
-            output.push(b'\n');
-        }
-        
-        Ok(CommandResult::success().with_stdout(output))
-    }
-}
+            let path_obj = Path::new(path);
+            if options.list_directory_contents || !path_obj.is_dir() {
+                // 単一ファイルまたはディレクトリ自体を表示
+                if let Ok(metadata) = fs::metadata(path_obj) {
+                    let entry = path_obj.file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.to_string());
 
-/// コマンドライン引数からオプションとターゲットパスを解析
-fn parse_options(args: &[&String]) -> Result<(LsOptions, Vec<String>)> {
-    let mut options = LsOptions::default();
-    let mut targets = Vec::new();
-    
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        
-        if arg.starts_with("-") && arg.len() > 1 && !arg.starts_with("--") {
-            // 短いオプション（例: -la）
-            for c in arg.chars().skip(1) {
-                match c {
-                    'a' => options.all = true,
-                    'A' => options.almost_all = true,
-                    'l' => options.long_format = true,
-                    'h' => options.human_readable = true,
-                    'R' => options.recursive = true,
-                    'r' => options.reverse_sort = true,
-                    'S' => options.sort_by_size = true,
-                    't' => options.sort_by_time = true,
-                    'i' => options.show_inode = true,
-                    'F' => options.classify = true,
-                    '1' => options.one_per_line = true,
-                    _ => {
-                        return Err(anyhow::anyhow!("ls: 不明なオプション -- '{}'", c));
-                    }
-                }
-            }
-        } else if arg.starts_with("--") {
-            // 長いオプション（例: --all）
-            match arg.as_str() {
-                "--all" => options.all = true,
-                "--almost-all" => options.almost_all = true,
-                "--human-readable" => options.human_readable = true,
-                "--recursive" => options.recursive = true,
-                "--reverse" => options.reverse_sort = true,
-                "--classify" => options.classify = true,
-                _ if arg.starts_with("--color") => {
-                    options.colorize = match arg.as_str() {
-                        "--color" | "--color=always" => true,
-                        "--color=never" => false,
-                        "--color=auto" => atty::is(atty::Stream::Stdout),
-                        _ => {
-                            return Err(anyhow::anyhow!("ls: '--color' オプションの引数が不正です: '{}'", arg));
-                        }
+                    let formatted = if options.long_format {
+                        self.format_entry_long(path_obj, &metadata, &entry, options)?
+                    } else {
+                        self.format_entry(path_obj, &metadata, &entry, options)?
                     };
+                    
+                    result.push_str(&formatted);
+                    result.push_str("\n");
+                } else {
+                    result.push_str(&format!("ls: {}: そのようなファイルやディレクトリはありません\n", path));
                 }
-                _ => {
-                    return Err(anyhow::anyhow!("ls: 不明なオプションです: '{}'", arg));
+            } else {
+                // ディレクトリの内容を表示
+                match self.list_directory(path_obj, options) {
+                    Ok(content) => {
+                        result.push_str(&content);
+                        
+                        // 再帰的に表示
+                        if options.recursive {
+                            if let Ok(entries) = fs::read_dir(path_obj) {
+                                for entry_result in entries {
+                                    if let Ok(entry) = entry_result {
+                                        let entry_path = entry.path();
+                                        if entry_path.is_dir() {
+                                            let entry_name = entry.file_name();
+                                            let name = entry_name.to_string_lossy();
+                                            
+                                            // 隠しディレクトリは無視（-aオプションあり時は表示）
+                                            if options.all || !name.starts_with('.') {
+                                                let sub_path = path_obj.join(&entry_name);
+                                                let sub_path_str = sub_path.to_string_lossy();
+                                                
+                                                result.push_str("\n\n");
+                                                result.push_str(&format!("{}:\n", sub_path_str));
+                                                
+                                                if let Ok(sub_content) = self.list_directory(&sub_path, options) {
+                                                    result.push_str(&sub_content);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        result.push_str(&format!("ls: {}: {}\n", path, e));
+                    }
                 }
             }
-        } else {
-            // ターゲットパス
-            targets.push(arg.clone());
         }
         
-        i += 1;
+        Ok(result)
     }
     
-    // デフォルトで色付き表示を有効化（端末に出力している場合）
-    if !options.colorize {
-        options.colorize = atty::is(atty::Stream::Stdout);
-    }
-    
-    Ok((options, targets))
-}
-
-/// ディレクトリの内容を一覧表示
-fn list_directory(dir_path: &Path, options: &LsOptions) -> Result<String> {
-    // ディレクトリかどうかをチェック
-    if dir_path.is_dir() {
-        // ディレクトリ内のエントリを取得
-        let mut entries = Vec::new();
-        for entry in fs::read_dir(dir_path)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            
-            // 隠しファイルの処理
-            if file_name.starts_with(".") {
-                if file_name == "." || file_name == ".." {
-                    if !options.all {
-                        continue;
-                    }
-                } else if !options.all && !options.almost_all {
-                    continue;
-                }
-            }
-            
-            // ファイル情報を取得
-            match get_file_info(&path) {
-                Ok(info) => entries.push(info),
-                Err(err) => {
-                    warn!("ファイル情報の取得に失敗しました: {}: {}", path.display(), err);
-                    // エラーが出ても処理を続行
-                }
-            }
-        }
+    /// ディレクトリの内容を一覧表示
+    fn list_directory(&self, dir_path: &Path, options: &LsOptions) -> Result<String> {
+        // ディレクトリを読み込む
+        let mut entries: Vec<DirEntry> = fs::read_dir(dir_path)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                options.all || !name.starts_with('.')
+            })
+            .collect();
         
         // エントリをソート
-        sort_entries(&mut entries, options);
+        self.sort_entries(&mut entries, options)?;
         
-        // 結果を整形
-        format_directory_listing(&entries, options)
-    } else if dir_path.exists() {
-        // 単一のファイルの場合
-        match get_file_info(dir_path) {
-            Ok(info) => {
-                let entries = vec![info];
-                format_directory_listing(&entries, options)
+        let mut result = String::new();
+        
+        if options.long_format {
+            // 長いリスト形式で表示
+            for entry in entries {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Ok(metadata) = entry.metadata() {
+                    let line = self.format_entry_long(&path, &metadata, &name, options)?;
+                    result.push_str(&line);
+                    result.push_str("\n");
+                }
             }
-            Err(err) => Err(anyhow::anyhow!("ファイル情報の取得に失敗しました: {}", err))
+        } else {
+            // 通常形式で表示
+            let mut lines = Vec::new();
+            let mut current_line = String::new();
+            let terminal_width = self.get_terminal_width();
+            let max_name_len = entries.iter()
+                .map(|e| e.file_name().to_string_lossy().len())
+                .max()
+                .unwrap_or(0);
+            let column_width = (max_name_len + 2).min(40);
+            let columns = (terminal_width / column_width).max(1);
+            
+            for (i, entry) in entries.iter().enumerate() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Ok(metadata) = entry.metadata() {
+                    let formatted = self.format_entry(&path, &metadata, &name, options)?;
+                    
+                    if i > 0 && i % columns == 0 {
+                        lines.push(current_line);
+                        current_line = String::new();
+                    }
+                    
+                    let padding = column_width.saturating_sub(name.len());
+                    current_line.push_str(&formatted);
+                    current_line.push_str(&" ".repeat(padding));
+                }
+            }
+            
+            if !current_line.is_empty() {
+                lines.push(current_line);
+            }
+            
+            result.push_str(&lines.join("\n"));
         }
-    } else {
-        Err(anyhow::anyhow!("そのようなファイルやディレクトリはありません"))
+        
+        Ok(result)
     }
-}
-
-/// ディレクトリ内のファイル一覧をソート
-fn sort_entries(entries: &mut Vec<FileInfo>, options: &LsOptions) {
+    
+    /// エントリを指定された順序でソート
+    fn sort_entries(&self, entries: &mut Vec<DirEntry>, options: &LsOptions) -> Result<()> {
     if options.sort_by_size {
         // サイズでソート
         entries.sort_by(|a, b| {
+                let size_a = a.metadata().map(|m| m.len()).unwrap_or(0);
+                let size_b = b.metadata().map(|m| m.len()).unwrap_or(0);
             if options.reverse_sort {
-                a.size.cmp(&b.size)
+                    size_a.cmp(&size_b)
             } else {
-                b.size.cmp(&a.size)
+                    size_b.cmp(&size_a)
             }
         });
     } else if options.sort_by_time {
-        // 更新時刻でソート
+            // 更新日時でソート
         entries.sort_by(|a, b| {
+                let time_a = a.metadata().and_then(|m| m.modified()).ok();
+                let time_b = b.metadata().and_then(|m| m.modified()).ok();
+                let ord = match (time_a, time_b) {
+                    (Some(t_a), Some(t_b)) => t_b.cmp(&t_a),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                };
             if options.reverse_sort {
-                a.modified.cmp(&b.modified)
+                    ord.reverse()
             } else {
-                b.modified.cmp(&a.modified)
+                    ord
             }
         });
     } else {
-        // デフォルトは名前でソート
+            // 名前でソート（デフォルト）
         entries.sort_by(|a, b| {
-            let ordering = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+                let name_a = a.file_name().to_string_lossy();
+                let name_b = b.file_name().to_string_lossy();
+                let ord = name_a.cmp(&name_b);
             if options.reverse_sort {
-                ordering.reverse()
+                    ord.reverse()
             } else {
-                ordering
-            }
-        });
-    }
-}
-
-/// ファイル一覧を整形して出力形式に変換
-fn format_directory_listing(entries: &[FileInfo], options: &LsOptions) -> Result<String> {
-    if entries.is_empty() {
-        return Ok(String::new());
-    }
-    
-    if options.long_format {
-        // 詳細表示形式
-        format_long_listing(entries, options)
-    } else if options.one_per_line {
-        // 1行に1エントリ
-        let mut result = String::new();
-        for entry in entries {
-            let file_name = get_colorized_filename(entry, options);
-            result.push_str(&file_name);
-            result.push('\n');
+                    ord
+                }
+            });
         }
-        Ok(result)
-    } else {
-        // 複数列表示（端末幅に合わせる）
-        format_columns_listing(entries, options)
+        
+        Ok(())
     }
-}
-
-/// 詳細表示形式でファイル一覧を整形
-fn format_long_listing(entries: &[FileInfo], options: &LsOptions) -> Result<String> {
-    let mut result = String::new();
     
-    // カラム幅を計算
-    let max_links = entries.iter().map(|e| e.links.to_string().len()).max().unwrap_or(1);
-    let max_user = entries.iter().map(|e| get_username(e.uid).len()).max().unwrap_or(1);
-    let max_group = entries.iter().map(|e| get_groupname(e.gid).len()).max().unwrap_or(1);
-    let max_size = entries.iter().map(|e| {
-        if options.human_readable {
-            format_file_size(e.size).len()
+    /// 通常形式でエントリをフォーマット
+    fn format_entry(&self, path: &Path, metadata: &Metadata, name: &str, options: &LsOptions) -> Result<String> {
+        if !options.colorize {
+            return Ok(name.to_string());
+        }
+        
+        // ファイルタイプに基づいて色付け
+        if metadata.is_dir() {
+            Ok(name.blue().bold().to_string())
+        } else if metadata.is_symlink() {
+            Ok(name.cyan().to_string())
+        } else if metadata.permissions().mode() & 0o111 != 0 {
+            // 実行可能ファイル
+            Ok(name.green().to_string())
         } else {
-            e.size.to_string().len()
+            Ok(name.to_string())
         }
-    }).max().unwrap_or(1);
+    }
     
-    // 各エントリについて詳細情報を表示
-    for entry in entries {
-        // ファイルタイプとパーミッション
-        let type_char = get_file_type_char(entry.file_type);
-        let permissions = format_permissions(&entry.permissions);
-        result.push(type_char);
-        result.push_str(&permissions);
-        result.push(' ');
+    /// 長いリスト形式でエントリをフォーマット
+    fn format_entry_long(&self, path: &Path, metadata: &Metadata, name: &str, options: &LsOptions) -> Result<String> {
+        // パーミッション
+        let mode = self.format_mode(metadata.permissions().mode());
         
-        // ハードリンク数
-        result.push_str(&format!("{:>width$} ", entry.links, width = max_links));
+        // ハードリンク数（Unixのみ）
+        #[cfg(unix)]
+        let nlink = metadata.nlink().unwrap_or(1);
+        #[cfg(not(unix))]
+        let nlink = 1;
         
-        // 所有者とグループ
-        let owner = get_username(entry.uid);
-        let group = get_groupname(entry.gid);
-        result.push_str(&format!("{:<width$} ", owner, width = max_user));
-        result.push_str(&format!("{:<width$} ", group, width = max_group));
+        // 所有者名
+        #[cfg(unix)]
+        let owner = self.get_user_name(metadata.uid().unwrap_or(0));
+        #[cfg(not(unix))]
+        let owner = String::from("user");
+        
+        // グループ名
+        #[cfg(unix)]
+        let group = self.get_group_name(metadata.gid().unwrap_or(0));
+        #[cfg(not(unix))]
+        let group = String::from("group");
         
         // ファイルサイズ
-        if options.human_readable {
-            let size = format_file_size(entry.size);
-            result.push_str(&format!("{:>width$} ", size, width = max_size));
+        let size = if options.human_readable {
+            self.format_size_human_readable(metadata.len())
         } else {
-            result.push_str(&format!("{:>width$} ", entry.size, width = max_size));
-        }
+            metadata.len().to_string()
+        };
         
         // 更新日時
-        let time = format_timestamp(entry.modified);
-        result.push_str(&format!("{} ", time));
+        let modified = metadata.modified().unwrap_or_else(|_| SystemTime::now());
+        let datetime: DateTime<Local> = modified.into();
+        let date = datetime.format("%b %d %H:%M").to_string();
         
-        // ファイル名（色付き）
-        let file_name = get_colorized_filename(entry, options);
-        result.push_str(&file_name);
+        // カラー表示の名前
+        let colored_name = if options.colorize {
+            if metadata.is_dir() {
+                name.blue().bold().to_string()
+            } else if metadata.is_symlink() {
+                name.cyan().to_string()
+            } else if metadata.permissions().mode() & 0o111 != 0 {
+                name.green().to_string()
+            } else {
+                name.to_string()
+            }
+        } else {
+            name.to_string()
+        };
         
         // シンボリックリンクの場合はリンク先を表示
-        if entry.file_type == FileType::SymbolicLink {
-            if let Ok(target) = fs::read_link(&entry.path) {
-                result.push_str(" -> ");
-                result.push_str(&target.to_string_lossy());
+        let display_name = if metadata.is_symlink() && !options.no_dereference {
+            if let Ok(target) = fs::read_link(path) {
+                format!("{} -> {}", colored_name, target.to_string_lossy())
+            } else {
+                colored_name
             }
-        }
+        } else {
+            colored_name
+        };
         
-        result.push('\n');
+        Ok(format!(
+            "{} {:>2} {:8} {:8} {:>8} {} {}",
+            mode, nlink, owner, group, size, date, display_name
+        ))
     }
     
-    Ok(result)
-}
-
-/// 複数列表示形式でファイル一覧を整形
-fn format_columns_listing(entries: &[FileInfo], options: &LsOptions) -> Result<String> {
-    // 端末の幅を取得（利用できない場合は80列と仮定）
-    let term_width = match term_size::dimensions() {
-        Some((width, _)) => width,
-        None => 80,
-    };
-    
-    // ファイル名の最大長を計算（色コードを除く）
-    let max_name_len = entries.iter()
-        .map(|e| {
-            let mut len = e.name.len();
-            if options.classify {
-                if e.file_type == FileType::Directory {
-                    len += 1; // '/'を追加
-                } else if e.file_type == FileType::SymbolicLink {
-                    len += 1; // '@'を追加
-                } else if e.permissions.user.execute ||
-                          e.permissions.group.execute ||
-                          e.permissions.other.execute {
-                    len += 1; // '*'を追加
-                }
-            }
-            len
-        })
-        .max()
-        .unwrap_or(0);
-    
-    // カラム間のスペース（最低2文字）
-    let column_spacing = 2;
-    
-    // カラム数を計算
-    let column_width = max_name_len + column_spacing;
-    let num_columns = if column_width > 0 {
-        std::cmp::max(1, term_width / column_width)
-    } else {
-        1
-    };
-    
-    // 行数を計算
-    let num_rows = (entries.len() + num_columns - 1) / num_columns;
-    
-    let mut result = String::new();
-    
-    // 行ごとに処理
-    for row in 0..num_rows {
-        for col in 0..num_columns {
-            let index = row + col * num_rows;
-            if index < entries.len() {
-                let entry = &entries[index];
-                let file_name = get_colorized_filename(entry, options);
-                
-                // 名前を表示
-                result.push_str(&file_name);
-                
-                // 最後の列でなければ余白を追加
-                if col < num_columns - 1 && index + num_rows < entries.len() {
-                    let visible_length = entry.name.len(); // 色コードを除いた表示幅
-                    let padding = column_width - visible_length;
-                    result.push_str(&" ".repeat(padding));
-                }
-            }
-        }
-        result.push('\n');
-    }
-    
-    Ok(result)
-}
-
-/// ファイル名を色付きで取得（オプションに応じて）
-fn get_colorized_filename(entry: &FileInfo, options: &LsOptions) -> String {
-    let mut name = entry.name.clone();
-    
-    // オプションに応じてファイル名に種類を示す記号を追加
-    if options.classify {
-        if entry.file_type == FileType::Directory {
-            name.push('/');
-        } else if entry.file_type == FileType::SymbolicLink {
-            name.push('@');
-        } else if entry.permissions.user.execute ||
-                  entry.permissions.group.execute ||
-                  entry.permissions.other.execute {
-            name.push('*');
-        }
-    }
-    
-    // 色付き表示が有効な場合
-    if options.colorize {
-        // ANSIエスケープシーケンスで色を指定
-        match entry.file_type {
-            FileType::Directory => format!("\x1b[1;34m{}\x1b[0m", name),  // 青色（太字）
-            FileType::SymbolicLink => format!("\x1b[1;36m{}\x1b[0m", name), // シアン（太字）
-            FileType::Regular if entry.permissions.user.execute ||
-                            entry.permissions.group.execute ||
-                            entry.permissions.other.execute => 
-                format!("\x1b[1;32m{}\x1b[0m", name), // 緑色（太字）
-            _ => name, // 通常のファイルは色なし
-        }
-    } else {
-        name
-    }
-}
-
-/// ディレクトリを再帰的に表示
-fn list_recursive(dir_path: &Path, options: &LsOptions) -> Result<String> {
-    let mut result = String::new();
-    let mut dirs_to_process = Vec::new();
-    
-    // ディレクトリ内のエントリを取得
-    for entry in fs::read_dir(dir_path)? {
-        let entry = entry?;
-        let path = entry.path();
+    /// ファイルモードを文字列表現に変換
+    fn format_mode(&self, mode: u32) -> String {
+        let file_type = match mode & 0o170000 {
+            0o040000 => 'd',  // ディレクトリ
+            0o120000 => 'l',  // シンボリックリンク
+            0o100000 => '-',  // 通常ファイル
+            0o060000 => 'b',  // ブロックデバイス
+            0o020000 => 'c',  // キャラクタデバイス
+            0o010000 => 'p',  // 名前付きパイプ
+            0o140000 => 's',  // ソケット
+            _ => '?',         // 不明
+        };
         
-        if path.is_dir() {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            
-            // "."や".."は処理しない
-            if file_name != "." && file_name != ".." {
-                // 隠しディレクトリの処理
-                if file_name.starts_with(".") {
-                    if options.all || options.almost_all {
-                        dirs_to_process.push(path);
+        let user_r = if mode & 0o400 != 0 { 'r' } else { '-' };
+        let user_w = if mode & 0o200 != 0 { 'w' } else { '-' };
+        let user_x = match mode & 0o4100 {
+            0o4100 => 's',  // setuid + 実行可能
+            0o4000 => 'S',  // setuid
+            0o0100 => 'x',  // 実行可能
+            _ => '-',       // 実行不可
+        };
+        
+        let group_r = if mode & 0o040 != 0 { 'r' } else { '-' };
+        let group_w = if mode & 0o020 != 0 { 'w' } else { '-' };
+        let group_x = match mode & 0o2010 {
+            0o2010 => 's',  // setgid + 実行可能
+            0o2000 => 'S',  // setgid
+            0o0010 => 'x',  // 実行可能
+            _ => '-',       // 実行不可
+        };
+        
+        let other_r = if mode & 0o004 != 0 { 'r' } else { '-' };
+        let other_w = if mode & 0o002 != 0 { 'w' } else { '-' };
+        let other_x = match mode & 0o1001 {
+            0o1001 => 't',  // sticky bit + 実行可能
+            0o1000 => 'T',  // sticky bit
+            0o0001 => 'x',  // 実行可能
+            _ => '-',       // 実行不可
+        };
+        
+        format!(
+            "{}{}{}{}{}{}{}{}{}{}",
+            file_type, 
+            user_r, user_w, user_x,
+            group_r, group_w, group_x,
+            other_r, other_w, other_x
+        )
+    }
+    
+    /// UID からユーザー名を取得
+    #[cfg(unix)]
+    fn get_user_name(&self, uid: u32) -> String {
+        use std::ffi::CStr;
+        use std::mem;
+        use libc::{passwd, getpwuid, uid_t};
+        
+        unsafe {
+            let pw = getpwuid(uid as uid_t);
+            if !pw.is_null() {
+                let passwd: &passwd = &*pw;
+                if !passwd.pw_name.is_null() {
+                    let c_str = CStr::from_ptr(passwd.pw_name);
+                    if let Ok(name) = c_str.to_str() {
+                        return name.to_string();
                     }
-                } else {
-                    dirs_to_process.push(path);
                 }
             }
         }
+        
+        uid.to_string()
     }
     
-    // サブディレクトリを処理
-    for dir in dirs_to_process {
-        result.push('\n');
-        let header = format!("\n{}:", dir.display());
-        result.push_str(&header);
+    /// GID からグループ名を取得
+    #[cfg(unix)]
+    fn get_group_name(&self, gid: u32) -> String {
+        use std::ffi::CStr;
+        use std::mem;
+        use libc::{group, getgrgid, gid_t};
         
-        // サブディレクトリの内容を表示
-        match list_directory(&dir, options) {
-            Ok(listing) => {
-                result.push('\n');
-                result.push_str(&listing);
-            }
-            Err(err) => {
-                let error_message = format!("\nls: {}: {}", dir.display(), err);
-                result.push_str(&error_message);
+        unsafe {
+            let gr = getgrgid(gid as gid_t);
+            if !gr.is_null() {
+                let group: &group = &*gr;
+                if !group.gr_name.is_null() {
+                    let c_str = CStr::from_ptr(group.gr_name);
+                    if let Ok(name) = c_str.to_str() {
+                        return name.to_string();
+                    }
+                }
             }
         }
         
-        // さらに再帰
-        match list_recursive(&dir, options) {
-            Ok(recursive_listing) => {
-                result.push_str(&recursive_listing);
-            }
-            Err(err) => {
-                let error_message = format!("\nls: 再帰的なリスト表示中にエラーが発生しました: {}", err);
-                result.push_str(&error_message);
-            }
+        gid.to_string()
+    }
+    
+    /// ファイルサイズを人間が読みやすい形式でフォーマット
+    fn format_size_human_readable(&self, size: u64) -> String {
+        const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
+        
+        if size == 0 {
+            return "0".to_string();
+        }
+        
+        let mut size_f = size as f64;
+        let mut unit_index = 0;
+        
+        while size_f >= 1024.0 && unit_index < UNITS.len() - 1 {
+            size_f /= 1024.0;
+            unit_index += 1;
+        }
+        
+        if size_f < 10.0 && unit_index > 0 {
+            format!("{:.1}{}", size_f, UNITS[unit_index])
+        } else {
+            format!("{:.0}{}", size_f, UNITS[unit_index])
         }
     }
     
-    Ok(result)
+    /// ターミナルの幅を取得
+    fn get_terminal_width(&self) -> usize {
+        #[cfg(unix)]
+        {
+            use std::mem;
+            use libc::{ioctl, winsize, TIOCGWINSZ, STDOUT_FILENO};
+            
+            unsafe {
+                let mut ws: winsize = mem::zeroed();
+                if ioctl(STDOUT_FILENO, TIOCGWINSZ, &mut ws) == 0 {
+                    return ws.ws_col as usize;
+                }
+            }
+        }
+        
+        // デフォルト値またはエラー時
+        80
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::fs::{File, OpenOptions};
+    use std::io::Write;
+    use std::os::unix::fs::symlink;
+    
+    #[test]
+    fn test_ls_empty_dir() {
+        let dir = tempdir().unwrap();
+        let ls = LsCommand;
+        let options = LsOptions::default();
+        
+        let result = ls.list_directory(dir.path(), &options).unwrap();
+        assert_eq!(result, "");
+    }
+    
+    #[test]
+    fn test_ls_with_files() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        let _file = File::create(&file_path).unwrap();
+        
+        let ls = LsCommand;
+        let options = LsOptions::default();
+        
+        let result = ls.list_directory(dir.path(), &options).unwrap();
+        assert!(result.contains("test.txt"));
+    }
+    
+    #[test]
+    fn test_ls_hidden_files() {
+        let dir = tempdir().unwrap();
+        let visible_path = dir.path().join("visible.txt");
+        let hidden_path = dir.path().join(".hidden.txt");
+        let _visible = File::create(&visible_path).unwrap();
+        let _hidden = File::create(&hidden_path).unwrap();
+        
+        let ls = LsCommand;
+        let options = LsOptions::default();
+        
+        // 通常モード（隠しファイルを表示しない）
+        let result = ls.list_directory(dir.path(), &options).unwrap();
+        assert!(result.contains("visible.txt"));
+        assert!(!result.contains(".hidden.txt"));
+        
+        // 隠しファイルを表示するモード
+        let options_all = LsOptions {
+            all: true,
+            ..LsOptions::default()
+        };
+        let result_all = ls.list_directory(dir.path(), &options_all).unwrap();
+        assert!(result_all.contains("visible.txt"));
+        assert!(result_all.contains(".hidden.txt"));
+    }
+    
+    #[test]
+    fn test_format_mode() {
+        let ls = LsCommand;
+        
+        // 標準的なファイルパーミッション
+        assert_eq!(ls.format_mode(0o100644), "-rw-r--r--");
+        
+        // 実行可能ファイル
+        assert_eq!(ls.format_mode(0o100755), "-rwxr-xr-x");
+        
+        // ディレクトリ
+        assert_eq!(ls.format_mode(0o040755), "drwxr-xr-x");
+        
+        // シンボリックリンク
+        assert_eq!(ls.format_mode(0o120777), "lrwxrwxrwx");
+        
+        // setuid, setgid, sticky bit
+        assert_eq!(ls.format_mode(0o104755), "-rwsr-xr-x");
+        assert_eq!(ls.format_mode(0o102755), "-rwxr-sr-x");
+        assert_eq!(ls.format_mode(0o101755), "-rwxr-xr-t");
+    }
+    
+    #[test]
+    fn test_format_size_human_readable() {
+        let ls = LsCommand;
+        
+        assert_eq!(ls.format_size_human_readable(0), "0");
+        assert_eq!(ls.format_size_human_readable(1023), "1023B");
+        assert_eq!(ls.format_size_human_readable(1024), "1K");
+        assert_eq!(ls.format_size_human_readable(1536), "1.5K");
+        assert_eq!(ls.format_size_human_readable(1048576), "1M");
+        assert_eq!(ls.format_size_human_readable(1073741824), "1G");
+    }
 } 

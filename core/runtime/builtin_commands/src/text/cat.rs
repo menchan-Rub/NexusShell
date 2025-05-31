@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::{self, Read, BufReader, BufRead};
 use std::path::Path;
 use tracing::{debug, error, info};
+use tokio::io::AsyncReadExt;
 
 /// ファイルの内容を表示するコマンド
 pub struct CatCommand;
@@ -77,10 +78,10 @@ impl BuiltinCommand for CatCommand {
                 return Ok(CommandResult::failure(1)
                     .with_stderr("エラー: 標準入力が接続されていません".into_bytes()));
             }
-            
-            // 標準入力の処理はスタブとして残す
-            // 本来は stdin から読み込むべきだが、このコードでは空文字列を返す
-            let content = String::new();
+            // 標準入力から全データを読み込む
+            let mut stdin = tokio::io::stdin();
+            let mut content = String::new();
+            stdin.read_to_string(&mut content).await.unwrap_or(0);
             process_content(&content, show_all, number_lines, number_nonblank, &mut output);
         } else {
             // 各ファイルを処理

@@ -58,7 +58,7 @@ impl fmt::Display for Span {
 }
 
 /// エラー型
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug, Clone, PartialEq)]
 pub enum ParserError {
     #[error("字句解析エラー: {0} at {1}")]
     LexerError(String, Span),
@@ -72,28 +72,37 @@ pub enum ParserError {
     #[error("未実装: {0}")]
     NotImplemented(String),
     
-    #[error("予期しないトークン: 期待={expected:?}, 実際={actual:?} at {span}")]
+    #[error("予期しないトークンです (位置: {span})
+期待したトークン: {expected:?}
+実際のトークン: {actual:?}")]
     UnexpectedToken {
         expected: String,
         actual: String,
         span: Span,
     },
     
-    #[error("予期されるトークンが見つかりません: 期待={expected:?}, 実際={found:?} at {span}")]
+    #[error("予期されるトークンが見つかりませんでした (位置: {span})
+期待したトークン: {expected:?}
+実際のトークン: {found:?}")]
     ExpectedToken {
         expected: TokenKind,
         found: TokenKind,
         span: Span,
     },
     
-    #[error("複数のトークンのいずれかが予期されます: 期待={expected:?}, 実際={found:?} at {span}")]
+    #[error("複数のトークンのいずれかが予期されていました (位置: {span})
+期待したトークン群: {expected:?}
+実際のトークン: {found:?}")]
     ExpectedOneOf {
         expected: Vec<TokenKind>,
         found: TokenKind,
         span: Span,
     },
     
-    #[error("対応するデリミタが一致しません: 開始={opening:?}, 期待する終了={expected_closing:?}, 実際={found:?} at {span}")]
+    #[error("対応するデリミタが一致しません (位置: {span})
+開始デリミタ: {opening:?}
+期待した終了デリミタ: {expected_closing:?}
+実際のデリミタ: {found:?}")]
     MismatchedDelimiter {
         opening: TokenKind,
         expected_closing: TokenKind,
@@ -160,6 +169,25 @@ pub enum ParserError {
     
     #[error("型検証エラー: {0}")]
     ValidationError(String),
+
+    // lexer.rs で必要な追加バリアント
+    #[error("Unmatched closing delimiter '{delimiter}' at {span}")]
+    UnmatchedClosingDelimiter { span: Span, delimiter: String },
+
+    #[error("Unmatched opening delimiter '{delimiter}' at {span}")]
+    UnmatchedOpeningDelimiter { span: Span, delimiter: String },
+
+    #[error("Empty variable expression at {span}")]
+    EmptyVariableExpression { span: Span },
+
+    #[error("Invalid pipe usage at {span}: {message}")]
+    InvalidPipeUsage { span: Span, message: String },
+
+    #[error("Invalid redirection at {span}: {message}")]
+    InvalidRedirection { span: Span, message: String },
+
+    #[error("Unmatched quote '{quote}' at {span}")]
+    UnmatchedQuote { span: Span, quote: String },
 }
 
 /// エラーの深刻度
@@ -726,29 +754,135 @@ impl DefaultParser {
     }
     
     // サブシェル、ブロック、if文、ループなどの解析メソッドは省略
-    fn parse_subshell(&mut self, _context: &mut ParserContext) -> Result<AstNode> {
-        // 実装は省略
-        Err(ParserError::NotImplemented("サブシェルの解析はまだ実装されていません".to_string()))
+    fn parse_subshell(&mut self, context: &mut ParserContext) -> Result<AstNode> {
+        // '(' コマンド ')' の形式
+        let start = self.consume_token(context)?;
+        if start.kind != TokenKind::LeftParen {
+            return Err(ParserError::UnexpectedToken(format!("サブシェル開始'('が必要: {:?}", start)));
+        }
+        let command = self.parse_command(context)?;
+        let end = self.consume_token(context)?;
+        if end.kind != TokenKind::RightParen {
+            return Err(ParserError::UnexpectedToken(format!("サブシェル終了')'が必要: {:?}", end)));
+        }
+        Ok(AstNode::Subshell { command: Box::new(command), span: Span::default() })
     }
-    
-    fn parse_block(&mut self, _context: &mut ParserContext) -> Result<AstNode> {
-        // 実装は省略
-        Err(ParserError::NotImplemented("ブロックの解析はまだ実装されていません".to_string()))
+    fn parse_block(&mut self, context: &mut ParserContext) -> Result<AstNode> {
+        // '{' ... '}' の形式
+        let start = self.consume_token(context)?;
+        if start.kind != TokenKind::LeftBrace {
+            return Err(ParserError::UnexpectedToken(format!("ブロック開始'{'が必要: {:?}", start)));
+        }
+        let mut commands = Vec::new();
+        while !self.check_token_kind(context, TokenKind::RightBrace) && self.has_more_tokens(context) {
+            commands.push(self.parse_command(context)?);
+        }
+        let end = self.consume_token(context)?;
+        if end.kind != TokenKind::RightBrace {
+            return Err(ParserError::UnexpectedToken(format!("ブロック終了'}'が必要: {:?}", end)));
+        }
+        Ok(AstNode::Block { commands, span: Span::default() })
     }
-    
-    fn parse_if_statement(&mut self, _context: &mut ParserContext) -> Result<AstNode> {
-        // 実装は省略
-        Err(ParserError::NotImplemented("if文の解析はまだ実装されていません".to_string()))
+    fn parse_if_statement(&mut self, context: &mut ParserContext) -> Result<AstNode> {
+        // 'if' 条件 'then' ... ['else' ...] 'fi'
+        let if_token = self.consume_token(context)?;
+        if if_token.kind != TokenKind::If {
+            return Err(ParserError::UnexpectedToken(format!("if文開始'if'が必要: {:?}", if_token)));
+        }
+        let condition = self.parse_command(context)?;
+        let then_token = self.consume_token(context)?;
+        if then_token.kind != TokenKind::Then {
+            return Err(ParserError::UnexpectedToken(format!("thenが必要: {:?}", then_token)));
+        }
+        let mut then_branch = Vec::new();
+        while !self.check_token_kind(context, TokenKind::Else) && !self.check_token_kind(context, TokenKind::Fi) && self.has_more_tokens(context) {
+            then_branch.push(self.parse_command(context)?);
+        }
+        let else_branch = if self.check_token_kind(context, TokenKind::Else) {
+            self.consume_token(context)?;
+            let mut else_cmds = Vec::new();
+            while !self.check_token_kind(context, TokenKind::Fi) && self.has_more_tokens(context) {
+                else_cmds.push(self.parse_command(context)?);
+            }
+            Some(else_cmds)
+        } else {
+            None
+        };
+        let fi_token = self.consume_token(context)?;
+        if fi_token.kind != TokenKind::Fi {
+            return Err(ParserError::UnexpectedToken(format!("fiが必要: {:?}", fi_token)));
+        }
+        Ok(AstNode::Conditional {
+            condition: Box::new(condition),
+            then_branch: Box::new(AstNode::Block { commands: then_branch, span: Span::default() }),
+            else_branch: else_branch.map(|cmds| Box::new(AstNode::Block { commands: cmds, span: Span::default() })),
+            span: Span::default(),
+        })
     }
-    
-    fn parse_for_loop(&mut self, _context: &mut ParserContext) -> Result<AstNode> {
-        // 実装は省略
-        Err(ParserError::NotImplemented("forループの解析はまだ実装されていません".to_string()))
+    fn parse_for_loop(&mut self, context: &mut ParserContext) -> Result<AstNode> {
+        // 'for' 変数 'in' リスト 'do' ... 'done'
+        let for_token = self.consume_token(context)?;
+        if for_token.kind != TokenKind::For {
+            return Err(ParserError::UnexpectedToken(format!("for開始が必要: {:?}", for_token)));
+        }
+        let var_token = self.consume_token(context)?;
+        let var_name = var_token.value;
+        let in_token = self.consume_token(context)?;
+        if in_token.kind != TokenKind::Word || in_token.value != "in" {
+            return Err(ParserError::UnexpectedToken(format!("for文'in'が必要: {:?}", in_token)));
+        }
+        let mut items = Vec::new();
+        while !self.check_token_kind(context, TokenKind::Do) && self.has_more_tokens(context) {
+            items.push(self.consume_token(context)?.value);
+        }
+        let do_token = self.consume_token(context)?;
+        if do_token.kind != TokenKind::Do {
+            return Err(ParserError::UnexpectedToken(format!("doが必要: {:?}", do_token)));
+        }
+        let mut body = Vec::new();
+        while !self.check_token_kind(context, TokenKind::Done) && self.has_more_tokens(context) {
+            body.push(self.parse_command(context)?);
+        }
+        let done_token = self.consume_token(context)?;
+        if done_token.kind != TokenKind::Done {
+            return Err(ParserError::UnexpectedToken(format!("doneが必要: {:?}", done_token)));
+        }
+        Ok(AstNode::Loop {
+            kind: LoopKind::For,
+            initializer: Some(Box::new(AstNode::Literal { value: var_name, kind: TokenKind::Word, span: Span::default() })),
+            condition: Box::new(AstNode::ArrayLiteral { elements: items.into_iter().map(|v| AstNode::Literal { value: v, kind: TokenKind::Word, span: Span::default() }).collect(), span: Span::default() }),
+            increment: None,
+            body: Box::new(AstNode::Block { commands: body, span: Span::default() }),
+            span: Span::default(),
+        })
     }
-    
-    fn parse_while_loop(&mut self, _context: &mut ParserContext) -> Result<AstNode> {
-        // 実装は省略
-        Err(ParserError::NotImplemented("whileループの解析はまだ実装されていません".to_string()))
+    fn parse_while_loop(&mut self, context: &mut ParserContext) -> Result<AstNode> {
+        // 'while' 条件 'do' ... 'done'
+        let while_token = self.consume_token(context)?;
+        if while_token.kind != TokenKind::While {
+            return Err(ParserError::UnexpectedToken(format!("while開始が必要: {:?}", while_token)));
+        }
+        let condition = self.parse_command(context)?;
+        let do_token = self.consume_token(context)?;
+        if do_token.kind != TokenKind::Do {
+            return Err(ParserError::UnexpectedToken(format!("doが必要: {:?}", do_token)));
+        }
+        let mut body = Vec::new();
+        while !self.check_token_kind(context, TokenKind::Done) && self.has_more_tokens(context) {
+            body.push(self.parse_command(context)?);
+        }
+        let done_token = self.consume_token(context)?;
+        if done_token.kind != TokenKind::Done {
+            return Err(ParserError::UnexpectedToken(format!("doneが必要: {:?}", done_token)));
+        }
+        Ok(AstNode::Loop {
+            kind: LoopKind::While,
+            initializer: None,
+            condition: Box::new(condition),
+            increment: None,
+            body: Box::new(AstNode::Block { commands: body, span: Span::default() }),
+            span: Span::default(),
+        })
     }
 }
 
@@ -1193,4 +1327,49 @@ pub fn parse_with_strict_typing(input: &str) -> Result<AstNode> {
     type_checker.check(&ast)?;
     
     Ok(ast)
+}
+
+// ParserError に span() メソッドを実装
+impl ParserError {
+    pub fn span(&self) -> Span {
+        match self {
+            ParserError::LexerError(_, span) => *span,
+            ParserError::SyntaxError(_, span) => *span,
+            ParserError::SemanticError(_, span) => *span,
+            ParserError::UnexpectedToken { span, .. } => *span,
+            ParserError::ExpectedToken { span, .. } => *span,
+            ParserError::ExpectedOneOf { span, .. } => *span,
+            ParserError::MismatchedDelimiter { span, .. } => *span,
+            ParserError::UnknownToken(_, span) => *span,
+            ParserError::InvalidCharacter(_, span) => *span,
+            ParserError::InvalidNumber(_, span) => *span,
+            ParserError::InvalidString(_, span) => *span,
+            ParserError::InvalidIdentifier(_, span) => *span,
+            ParserError::UndefinedVariable(_, span) => *span,
+            ParserError::InvalidPath(_, span) => *span,
+            ParserError::CommandNotFound(_, span) => *span,
+            ParserError::TypeMismatch(_, span) => *span,
+            ParserError::TypeError(_, span) => *span,
+            // ChainedError, IoError など span を持たないものは、デフォルトのSpanを返すか、エラーにする
+            // ここでは仮にDefaultを返す
+            ParserError::ChainedError(_) => Span::default(), 
+            ParserError::IoError(_) => Span::default(),
+            ParserError::InternalError(_) => Span::default(),
+            ParserError::NotImplemented(_) => Span::default(),
+            ParserError::UnexpectedEOF(_) => Span::default(),
+            ParserError::PluginError(_) => Span::default(),
+            ParserError::CompletionError(_) => Span::default(),
+            ParserError::PredictionError(_) => Span::default(),
+            ParserError::MetricsError(_) => Span::default(),
+            ParserError::RecoveryError(_) => Span::default(),
+            ParserError::ValidationError(_) => Span::default(),
+            // 追加したバリアント
+            ParserError::UnmatchedClosingDelimiter { span, .. } => *span,
+            ParserError::UnmatchedOpeningDelimiter { span, .. } => *span,
+            ParserError::EmptyVariableExpression { span } => *span,
+            ParserError::InvalidPipeUsage { span, .. } => *span,
+            ParserError::InvalidRedirection { span, .. } => *span,
+            ParserError::UnmatchedQuote { span, .. } => *span,
+        }
+    }
 }

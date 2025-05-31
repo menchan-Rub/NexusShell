@@ -393,10 +393,41 @@ impl RemoteConnection {
                     ));
                 }
                 AuthMethod::KeyboardInteractive => {
-                    // キーボードインタラクティブ認証（実際の実装では対話プロンプトを使用）
-                    return Err(RemoteExecutorError::AuthenticationFailed(
-                        "キーボードインタラクティブ認証は現在サポートされていません".to_string()
-                    ));
+                    // キーボードインタラクティブ認証の実装
+                    debug!("キーボードインタラクティブ認証を開始: {}@{}", &self.username, &self.host);
+                    
+                    // 認証チャレンジを処理
+                    let prompts = session.keyboard_interactive_prompts()?;
+                    let mut responses = Vec::new();
+                    
+                    // セキュリティ設定を非同期的にロック
+                    let security = self.security.read().await;
+                    
+                    for prompt in prompts {
+                        // プロンプトをユーザーに表示
+                        let response = if let Some(callback) = &security.host_key_callback {
+                            // 同期コールバックを呼び出し
+                            (callback)(prompt.text.clone(), prompt.echo)
+                        } else {
+                            // コールバックが設定されていない場合はデフォルトの処理
+                            use std::io::{stdin, stdout, Write};
+                            print!("{}", prompt.text);
+                            stdout().flush()?;
+                            
+                            let mut response = String::new();
+                            stdin().read_line(&mut response)?;
+                            response.trim().to_string()
+                        };
+                        
+                        responses.push(response);
+                    }
+                    
+                    // セキュリティ設定のロックを解放
+                    drop(security);
+                    
+                    // レスポンスを送信
+                    session.keyboard_interactive_authenticate(responses)?;
+                    debug!("キーボードインタラクティブ認証成功: {}@{}", &self.username, &self.host);
                 }
                 AuthMethod::Kerberos => {
                     // Kerberos認証（現在のlibssh2ではサポートされていないため、エラーを返す）
@@ -649,7 +680,7 @@ impl RemoteConnection {
         let timeout_duration = self.config.command_timeout();
         let execution_result = timeout(
             timeout_duration,
-            self.execute_command_internal(session_arc, command),
+            self.execute_command_internal(&session_arc, command),
         ).await;
         
         match execution_result {
@@ -707,7 +738,7 @@ impl RemoteConnection {
         }
     }
 
-    /// 内部コマンド実行
+    /// リモートコマンドを実行します（内部実装）
     async fn execute_command_internal(
         &self,
         session_arc: Arc<RwLock<Option<Session>>>,
@@ -715,18 +746,24 @@ impl RemoteConnection {
     ) -> Result<CommandResult, RemoteExecutorError> {
         let command_str = command.to_string();
         
+        // セッションを非同期に取得して複製
+        let session_guard = session_arc.read().await;
+        let session_opt = session_guard.as_ref();
+        
+        // Sessionのクローンを作成
+        let session = match session_opt {
+            Some(s) => s.clone(),
+            None => return Err(RemoteExecutorError::ConnectionClosed("セッションが存在しません".to_string())),
+        };
+        
         // ブロッキング操作をspawn_blockingで実行
         tokio::task::spawn_blocking(move || -> Result<CommandResult, RemoteExecutorError> {
-            let session_guard = session_arc.blocking_lock();
-            let session = session_guard.as_ref()
-                .ok_or_else(|| RemoteExecutorError::ConnectionClosed("セッションが存在しません".to_string()))?;
-            
             // チャネルを開く
             let mut channel = session.channel_session()
                 .map_err(|e| RemoteExecutorError::ChannelOpenFailed(format!("チャネルのオープンに失敗: {}", e)))?;
             
             // 擬似ターミナルを要求（オプション）
-            if let Some(term) = session_guard.as_ref().unwrap().blocking_getenv("TERM") {
+            if let Some(term) = session.blocking_getenv("TERM") {
                 let term_str = term.unwrap_or_else(|| "xterm".to_string());
                 let _ = channel.request_pty(&term_str, None, None);
             }
@@ -785,11 +822,95 @@ impl RemoteConnection {
             return false;
         }
         
-        // 実際に接続を確認（軽量なコマンドを実行）
-        match self.check_connection().await {
-            Ok(true) => true,
-            _ => false,
+        // 高度な接続確認プロトコルを実行
+        const MAX_PING_RETRIES: u8 = 3;
+        const PING_TIMEOUT_MS: u64 = 500;
+        
+        let mut connected = false;
+        let mut latency_ms = 0.0;
+        let mut retry_count = 0;
+        
+        while retry_count < MAX_PING_RETRIES && !connected {
+            // タイムアウト付きで軽量なコマンドを実行
+            let start_time = Instant::now();
+            let ping_result = tokio::time::timeout(
+                Duration::from_millis(PING_TIMEOUT_MS),
+                self.execute_remote_command("echo NEXUSSHELL_PING")
+            ).await;
+            
+            match ping_result {
+                // タイムアウトなし、コマンド成功
+                Ok(Ok(_)) => {
+                    latency_ms = start_time.elapsed().as_millis() as f64;
+                    connected = true;
+                    
+                    // メトリクスを更新
+                    {
+                        let mut metrics = self.metrics.write().await;
+                        metrics.rtt_ms = (metrics.rtt_ms * metrics.rtt_samples as f64 + latency_ms) 
+                                      / (metrics.rtt_samples as f64 + 1.0);
+                        metrics.rtt_samples += 1;
+                    }
+                    
+                    trace!("接続確認成功: ホスト={}, RTT={:.2}ms", self.host, latency_ms);
+                }
+                // タイムアウトなし、コマンド失敗
+                Ok(Err(err)) => {
+                    warn!("接続確認コマンドが失敗: ホスト={}, エラー={}", self.host, err);
+                    retry_count += 1;
+                    
+                    // 短い待機時間を入れて再試行
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    
+                    // 障害の詳細を記録
+                    {
+                        let mut metrics = self.metrics.write().await;
+                        metrics.last_error = Some(format!("接続確認コマンド失敗: {}", err));
+                    }
+                }
+                // タイムアウト発生
+                Err(_) => {
+                    warn!("接続確認がタイムアウト: ホスト={}, タイムアウト={}ms", self.host, PING_TIMEOUT_MS);
+                    retry_count += 1;
+                    
+                    // より長い待機時間を入れて再試行
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    
+                    // 障害の詳細を記録
+                    {
+                        let mut metrics = self.metrics.write().await;
+                        metrics.last_error = Some(format!("接続確認タイムアウト: {}ms", PING_TIMEOUT_MS));
+                    }
+                }
+            }
         }
+        
+        // すべての再試行が失敗した場合は、再接続を試みる
+        if !connected {
+            debug!("接続が不安定のため再接続を試みます: ホスト={}", self.host);
+            
+            // 再接続を試行
+            match self.reconnect().await {
+                Ok(_) => {
+                    info!("ホスト {}への再接続に成功しました", self.host);
+                    connected = true;
+                }
+                Err(err) => {
+                    error!("ホスト {}への再接続に失敗しました: {}", self.host, err);
+                    
+                    // 障害情報を更新
+                    {
+                        let mut metrics = self.metrics.write().await;
+                        metrics.last_error = Some(format!("再接続失敗: {}", err));
+                    }
+                    
+                    // 接続フラグを更新
+                    *self.connected.write().await = false;
+                }
+            }
+        }
+        
+        connected
     }
     
     /// 接続状態を確認します
@@ -1010,12 +1131,18 @@ impl RemoteConnection {
         // セッションを取得
         let session_arc = self.get_session().await?;
         
+        // セッションを非同期に取得して複製
+        let session_guard = session_arc.read().await;
+        let session_opt = session_guard.as_ref();
+        
+        // Sessionのクローンを作成
+        let session = match session_opt {
+            Some(s) => s.clone(),
+            None => return Err(RemoteExecutorError::ConnectionClosed("セッションが存在しません".to_string())),
+        };
+        
         // 新しいSFTPセッションを作成
         let sftp = tokio::task::spawn_blocking(move || -> Result<Sftp, RemoteExecutorError> {
-            let session_guard = session_arc.blocking_lock();
-            let session = session_guard.as_ref()
-                .ok_or_else(|| RemoteExecutorError::ConnectionClosed("セッションが存在しません".to_string()))?;
-                
             session.sftp()
                 .map_err(|e| RemoteExecutorError::DataTransferFailed(
                     format!("SFTPセッションの作成に失敗: {}", e)
@@ -1141,6 +1268,241 @@ impl RemoteConnection {
     pub async fn metrics(&self) -> ConnectionMetrics {
         self.metrics.read().await.clone()
     }
+
+    /// リモートホストのファイル情報を取得します
+    pub async fn stat_file(&self, path: &str) -> Result<super::protocol::FileInfo, RemoteExecutorError> {
+        debug!("ファイル情報を取得します: {}", path);
+        
+        // SFTPセッションを取得
+        let sftp = self.get_sftp_session().await?;
+        let path_str = path.to_string();
+        
+        // ブロッキング操作をspawn_blockingで実行
+        let file_info = tokio::task::spawn_blocking(move || -> Result<super::protocol::FileInfo, RemoteExecutorError> {
+            // ファイルの情報を取得
+            let stat = sftp.stat(&path_str)
+                .map_err(|e| RemoteExecutorError::DataTransferFailed(
+                    format!("ファイル情報の取得に失敗: {}", e)
+                ))?;
+            
+            // ファイル名を取得（パスから抽出）
+            let name = match std::path::Path::new(&path_str).file_name() {
+                Some(name) => name.to_string_lossy().to_string(),
+                None => path_str.clone(),
+            };
+            
+            // ファイル種別を解析
+            let file_type = match stat.file_type() {
+                Some(ssh2::FileType::S_IFDIR) => super::protocol::FileType::Directory,
+                Some(ssh2::FileType::S_IFLNK) => super::protocol::FileType::Symlink,
+                Some(ssh2::FileType::S_IFBLK) => super::protocol::FileType::BlockDevice,
+                Some(ssh2::FileType::S_IFCHR) => super::protocol::FileType::CharDevice,
+                Some(ssh2::FileType::S_IFIFO) => super::protocol::FileType::Fifo,
+                Some(ssh2::FileType::S_IFSOCK) => super::protocol::FileType::Socket,
+                Some(ssh2::FileType::S_IFREG) => super::protocol::FileType::Regular,
+                _ => super::protocol::FileType::Unknown,
+            };
+            
+            // unix時間に変換
+            let mtime = stat.mtime.unwrap_or(0);
+            let atime = stat.atime.unwrap_or(0);
+            
+            // ファイル情報を構築
+            let info = super::protocol::FileInfo {
+                name,
+                size: stat.size.unwrap_or(0),
+                modified_time: mtime,
+                access_time: atime,
+                creation_time: None, // SSH2/SFTPはcreation_timeを提供しない
+                file_type,
+                permissions: stat.perm.unwrap_or(0),
+                uid: stat.uid.unwrap_or(0),
+                gid: stat.gid.unwrap_or(0),
+            };
+            
+            Ok(info)
+        }).await.map_err(|e| RemoteExecutorError::DataTransferFailed(
+            format!("ファイル情報取得タスクがパニックしました: {}", e)
+        ))??;
+        
+        trace!("ファイル情報を取得しました: {} (type={:?}, size={})", 
+               path, file_info.file_type, file_info.size);
+        Ok(file_info)
+    }
+
+    /// リモートホストのファイル権限を変更します
+    pub async fn chmod_file(&self, path: &str, mode: u32) -> Result<(), RemoteExecutorError> {
+        debug!("ファイル権限を変更します: {} -> {:o}", path, mode);
+        
+        // SFTPセッションを取得
+        let sftp = self.get_sftp_session().await?;
+        let path_str = path.to_string();
+        
+        // ブロッキング操作をspawn_blockingで実行
+        tokio::task::spawn_blocking(move || -> Result<(), RemoteExecutorError> {
+            sftp.setstat(&path_str, ssh2::FileStat {
+                size: None,
+                uid: None,
+                gid: None,
+                perm: Some(mode),
+                atime: None,
+                mtime: None,
+            })
+            .map_err(|e| RemoteExecutorError::DataTransferFailed(
+                format!("ファイル権限の変更に失敗: {}", e)
+            ))
+        }).await.map_err(|e| RemoteExecutorError::DataTransferFailed(
+            format!("ファイル権限変更タスクがパニックしました: {}", e)
+        ))??;
+        
+        info!("ファイル権限を変更しました: {} -> {:o}", path, mode);
+        Ok(())
+    }
+
+    /// リモートホストのファイル名を変更します
+    pub async fn rename_file(&self, from: &str, to: &str) -> Result<(), RemoteExecutorError> {
+        debug!("ファイル名を変更します: {} -> {}", from, to);
+        
+        // SFTPセッションを取得
+        let sftp = self.get_sftp_session().await?;
+        let from_str = from.to_string();
+        let to_str = to.to_string();
+        
+        // ブロッキング操作をspawn_blockingで実行
+        tokio::task::spawn_blocking(move || -> Result<(), RemoteExecutorError> {
+            sftp.rename(&from_str, &to_str, None)
+                .map_err(|e| RemoteExecutorError::DataTransferFailed(
+                    format!("ファイル名の変更に失敗: {}", e)
+                ))
+        }).await.map_err(|e| RemoteExecutorError::DataTransferFailed(
+            format!("ファイル名変更タスクがパニックしました: {}", e)
+        ))??;
+        
+        info!("ファイル名を変更しました: {} -> {}", from, to);
+        Ok(())
+    }
+
+    /// リモートホストにシンボリックリンクを作成します
+    pub async fn create_symlink(&self, path: &str, target: &str) -> Result<(), RemoteExecutorError> {
+        debug!("シンボリックリンクを作成します: {} -> {}", path, target);
+        
+        // SFTPセッションを取得
+        let sftp = self.get_sftp_session().await?;
+        let path_str = path.to_string();
+        let target_str = target.to_string();
+        
+        // ブロッキング操作をspawn_blockingで実行
+        tokio::task::spawn_blocking(move || -> Result<(), RemoteExecutorError> {
+            sftp.symlink(&target_str, &path_str)
+                .map_err(|e| RemoteExecutorError::DataTransferFailed(
+                    format!("シンボリックリンクの作成に失敗: {}", e)
+                ))
+        }).await.map_err(|e| RemoteExecutorError::DataTransferFailed(
+            format!("シンボリックリンク作成タスクがパニックしました: {}", e)
+        ))??;
+        
+        info!("シンボリックリンクを作成しました: {} -> {}", path, target);
+        Ok(())
+    }
+
+    /// リモートホストのシンボリックリンクの参照先を取得します
+    pub async fn read_link(&self, path: &str) -> Result<String, RemoteExecutorError> {
+        debug!("シンボリックリンクの参照先を取得します: {}", path);
+        
+        // SFTPセッションを取得
+        let sftp = self.get_sftp_session().await?;
+        let path_str = path.to_string();
+        
+        // ブロッキング操作をspawn_blockingで実行
+        let target = tokio::task::spawn_blocking(move || -> Result<String, RemoteExecutorError> {
+            sftp.readlink(&path_str)
+                .map_err(|e| RemoteExecutorError::DataTransferFailed(
+                    format!("シンボリックリンクの読み取りに失敗: {}", e)
+                ))
+                .map(|p| p.to_string_lossy().to_string())
+        }).await.map_err(|e| RemoteExecutorError::DataTransferFailed(
+            format!("シンボリックリンク読み取りタスクがパニックしました: {}", e)
+        ))??;
+        
+        debug!("シンボリックリンクの参照先を取得しました: {} -> {}", path, target);
+        Ok(target)
+    }
+
+    /// リモートコマンドを実行します
+    async fn execute_remote_command(&self, command: &str) -> Result<(), RemoteExecutorError> {
+        let start_time = Instant::now();
+        let session_arc = self.get_session().await?;
+        
+        // メトリクスを更新
+        {
+            let mut metrics = self.metrics.write().await;
+            metrics.commands_executed += 1;
+            metrics.last_used_time = Some(Instant::now());
+        }
+
+        debug!("リモートコマンドを実行します: {}", command);
+        
+        // コマンド実行のタイムアウト
+        let timeout_duration = self.config.command_timeout();
+        let execution_result = timeout(
+            timeout_duration,
+            self.execute_command_internal(session_arc, command),
+        ).await;
+        
+        match execution_result {
+            Ok(result) => {
+                // 実行時間を計算
+                let execution_time = start_time.elapsed().as_millis() as u64;
+                
+                match result {
+                    Ok(mut cmd_result) => {
+                        // 成功
+                        trace!("コマンド実行結果: exit_code={}, stdout={}, stderr={}",
+                            cmd_result.exit_code, cmd_result.stdout, cmd_result.stderr);
+                        
+                        // 実行時間を設定
+                        cmd_result.execution_time_ms = execution_time;
+                        
+                        // プロメテウスメトリクスを更新
+                        counter!("nexusshell_remote_commands_executed", "host" => self.host.clone()).increment(1);
+                        histogram!("nexusshell_remote_command_time_ms", "host" => self.host.clone()).record(execution_time as f64);
+                        
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // コマンド実行エラー
+                        error!("コマンド実行に失敗しました: {} - {}", command, e);
+                        
+                        // メトリクスを更新
+                        {
+                            let mut metrics = self.metrics.write().await;
+                            metrics.last_error = Some(e.to_string());
+                        }
+                        
+                        // プロメテウスメトリクスを更新
+                        counter!("nexusshell_remote_command_errors", "host" => self.host.clone(), "error" => e.to_string()).increment(1);
+                        
+                        Err(e)
+                    }
+                }
+            }
+            Err(_) => {
+                // タイムアウト
+                error!("コマンド実行がタイムアウトしました: {}", command);
+                
+                // メトリクスを更新
+                {
+                    let mut metrics = self.metrics.write().await;
+                    metrics.last_error = Some("コマンド実行タイムアウト".to_string());
+                }
+                
+                // プロメテウスメトリクスを更新
+                counter!("nexusshell_remote_command_timeouts", "host" => self.host.clone()).increment(1);
+                
+                Err(RemoteExecutorError::Timeout)
+            }
+        }
+    }
 }
 
 /// SFTPプロトコルの実装
@@ -1162,7 +1524,7 @@ impl SftpProtocol {
 
 // SFTPプロトコルトレイトの実装
 #[async_trait::async_trait]
-impl SftpProtocol for SftpProtocol {
+impl super::protocol::SftpProtocol for SftpProtocol {
     /// ファイルをアップロードします
     async fn upload(&self, local_path: &Path, remote_path: &str) -> Result<(), RemoteExecutorError> {
         self.connection.upload_file(local_path, remote_path).await
@@ -1191,5 +1553,30 @@ impl SftpProtocol for SftpProtocol {
     /// ファイルを削除します
     async fn remove(&self, path: &str) -> Result<(), RemoteExecutorError> {
         self.connection.remove_file(path).await
+    }
+    
+    /// ファイルの情報を取得します
+    async fn stat(&self, path: &str) -> Result<super::protocol::FileInfo, RemoteExecutorError> {
+        self.connection.stat_file(path).await
+    }
+    
+    /// ファイルの権限を変更します
+    async fn chmod(&self, path: &str, mode: u32) -> Result<(), RemoteExecutorError> {
+        self.connection.chmod_file(path, mode).await
+    }
+    
+    /// ファイル名を変更します
+    async fn rename(&self, from: &str, to: &str) -> Result<(), RemoteExecutorError> {
+        self.connection.rename_file(from, to).await
+    }
+    
+    /// シンボリックリンクを作成します
+    async fn symlink(&self, path: &str, target: &str) -> Result<(), RemoteExecutorError> {
+        self.connection.create_symlink(path, target).await
+    }
+    
+    /// シンボリックリンクの参照先を取得します
+    async fn readlink(&self, path: &str) -> Result<String, RemoteExecutorError> {
+        self.connection.read_link(path).await
     }
 } 

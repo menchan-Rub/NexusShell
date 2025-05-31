@@ -259,19 +259,51 @@ impl AsyncRuntime {
     /// シャットダウン監視を開始します
     fn start_shutdown_monitor(&self, mut shutdown_rx: mpsc::Receiver<()>) {
         let name = self.name.clone();
+        let stats = self.stats.clone();
+        let metrics = self.metrics_reporter.clone();
         
         // シャットダウン要求を監視
         if let Some(rt) = &self.runtime {
             rt.spawn(async move {
                 if shutdown_rx.recv().await.is_some() {
                     info!("ランタイムのシャットダウン要求を受信しました: {}", name);
-                    // ここでクリーンアップ処理を行う
-                    // 実際のシャットダウンはdropで行われる
+                    
+                    // アクティブなタスクの完了を最大60秒待機
+                    let shutdown_timeout = Duration::from_secs(60);
+                    let start = Instant::now();
+                    
+                    // 実行中タスクの正常終了を待機
+                    loop {
+                        let active_count = stats.get_active_tasks();
+                        if active_count == 0 || start.elapsed() > shutdown_timeout {
+                            if active_count > 0 {
+                                warn!("タイムアウトのため、{}個の実行中タスクを強制終了します", active_count);
+                            }
+                            break;
+                        }
+                        
+                        // 0.5秒待機してリトライ
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        debug!("シャットダウン待機中... アクティブタスク: {}", active_count);
+                    }
+                    
+                    // メトリクスを永続化
+                    if let Err(e) = metrics.persist_metrics().await {
+                        error!("シャットダウン中にメトリクスの永続化に失敗しました: {}", e);
+                    }
+                    
+                    // リソース解放処理
+                    debug!("ランタイムリソースをクリーンアップしています: {}", name);
+                    
+                    // 最終的なメトリクスを記録
+                    let uptime = start.elapsed().as_secs();
+                    info!("ランタイム {} は {}秒間稼働し、正常にシャットダウンしました", 
+                         name, uptime);
                 }
             });
         }
     }
-    
+
     /// 非同期タスクを実行します
     pub fn spawn<F>(&self, future: F) -> Result<JoinHandle<F::Output>, AsyncRuntimeError>
     where
@@ -297,7 +329,7 @@ impl AsyncRuntime {
         F::Output: Send + 'static,
     {
         // ドメイン制限を取得
-        let semaphore = {
+            let semaphore = {
             let limits = self.concurrency_limits.read().await;
             match limits.get(&config.domain) {
                 Some(sem) => sem.clone(),
@@ -434,15 +466,25 @@ impl AsyncRuntime {
     pub async fn get_current_load(&self) -> f64 {
         *self.max_thread_load.read().await
     }
-    
+
     /// ランタイムをシャットダウンします
     pub fn shutdown(&mut self) {
         if let Some(sender) = self.shutdown_tx.take() {
             // シャットダウン通知を送信
             let _ = sender.blocking_send(());
             
-            // Tokioランタイムをシャットダウン
+            // シャットダウン完了を最大10秒待機
+            let start = Instant::now();
+            let timeout = Duration::from_secs(10);
+            
+            while self.runtime.is_some() && start.elapsed() < timeout {
+                // シャットダウン処理が完了するのを少し待つ
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            
+            // タイムアウトした場合は強制的にシャットダウン
             if let Some(rt) = self.runtime.take() {
+                warn!("ランタイム {} の正常なシャットダウンがタイムアウトしました。強制終了します。", self.name);
                 // 強制的にシャットダウン
                 drop(rt);
             }
@@ -450,13 +492,102 @@ impl AsyncRuntime {
             info!("ランタイム {} をシャットダウンしました", self.name);
         }
     }
+
+    /// アクティブなジョブをすべて停止します
+    async fn stop_all_jobs(&self) -> Result<(), AsyncRuntimeError> {
+        // 統計情報からアクティブなタスク情報を取得
+        let active_tasks = self.stats.get_active_task_ids();
+        
+        if !active_tasks.is_empty() {
+            info!("{}個のアクティブなタスクの停止を試みます", active_tasks.len());
+            
+            // 各タスクをキャンセル
+            for task_id in active_tasks {
+                debug!("タスク {} の停止を試みます", task_id);
+                self.stats.mark_task_cancelled(task_id);
+            }
+            
+            // すべてのタスクが完了または停止するのを待機（最大5秒）
+            let timeout = Duration::from_secs(5);
+            let start = Instant::now();
+            
+            while self.stats.get_active_tasks() > 0 && start.elapsed() < timeout {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// すべてのリソースを解放します
+    async fn release_all_resources(&self) -> Result<(), AsyncRuntimeError> {
+        // メトリクスの記録を停止
+        self.metrics_reporter.stop_recording().await;
+        
+        // スレッドプールのリソースを解放
+        if let Err(e) = self.thread_pool.shutdown().await {
+            error!("スレッドプールのシャットダウン中にエラーが発生しました: {}", e);
+        }
+        
+        // セマフォやロックなどの内部リソースを解放
+        {
+            let mut limits = self.concurrency_limits.write().await;
+            limits.clear();
+        }
+        
+        {
+            let mut active = self.active_tasks.write().await;
+            active.clear();
+        }
+        
+        // 最終的な統計情報を記録
+        let uptime = self.start_time.elapsed();
+        let total_tasks = self.stats.get_total_tasks();
+        
+        info!(
+            "ランタイム統計: 稼働時間={}秒, 総タスク数={}, 成功={}, 失敗={}, タイムアウト={}, キャンセル={}",
+            uptime.as_secs(),
+            total_tasks,
+            self.stats.get_successful_tasks(),
+            self.stats.get_failed_tasks(),
+            self.stats.get_timed_out_tasks(),
+            self.stats.get_cancelled_tasks()
+        );
+        
+        Ok(())
+    }
 }
 
 impl Drop for AsyncRuntime {
     fn drop(&mut self) {
-        // 明示的にシャットダウンを呼び出していない場合
+        // 明示的なシャットダウン処理が実行されていない場合、実行する
         if self.shutdown_tx.is_some() {
+            info!("AsyncRuntimeのDropによる自動シャットダウンを実行します: {}", self.name);
             self.shutdown();
+        }
+        
+        // 同期的にリソース解放処理を実行
+        if let Some(rt) = self.runtime.take() {
+            // 最後のクリーンアップ処理を実行
+            let thread_pool = self.thread_pool.clone();
+            
+            // メインとなるTokioランタイムがすでに終了している可能性があるため、
+            // 一時的なランタイムを作成してクリーンアップを実行
+            if let Ok(cleanup_rt) = Builder::new_current_thread().enable_all().build() {
+                let _ = cleanup_rt.block_on(async {
+                    // 残っているタスクのキャンセル
+                    let _ = thread_pool.shutdown().await;
+                    
+                    // 最終的なメトリクスを記録
+                    let uptime = self.start_time.elapsed().as_secs();
+                    info!("ランタイム {} は合計 {}秒間稼働しました", self.name, uptime);
+                });
+                
+                drop(cleanup_rt);
+            }
+            
+            // Tokioランタイムを解放
+            drop(rt);
         }
     }
 }

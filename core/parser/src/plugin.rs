@@ -803,6 +803,793 @@ impl SyntaxHighlightPlugin {
     }
 }
 
+/// プラグインをロードする
+pub fn load_plugin(plugin_path: &Path) -> Result<Arc<dyn Plugin>, PluginError> {
+    // ファイルの存在チェック
+    if !plugin_path.exists() {
+        return Err(PluginError::NotFound(plugin_path.to_string_lossy().to_string()));
+    }
+    
+    // ファイル拡張子のチェック
+    let extension = plugin_path.extension().and_then(|ext| ext.to_str())
+        .ok_or_else(|| PluginError::InvalidPluginFile(plugin_path.to_string_lossy().to_string()))?;
+    
+    match extension {
+        "so" | "dll" | "dylib" => load_native_plugin(plugin_path),
+        "lua" => load_lua_plugin(plugin_path),
+        "py" => load_python_plugin(plugin_path),
+        "js" => load_javascript_plugin(plugin_path),
+        "wasm" => load_wasm_plugin(plugin_path),
+        _ => Err(PluginError::UnsupportedPluginType(extension.to_string())),
+    }
+}
+
+/// ネイティブプラグインをロードする
+fn load_native_plugin(plugin_path: &Path) -> Result<Arc<dyn Plugin>, PluginError> {
+    // 安全対策：プラグインのパスをログに記録
+    log::info!("ネイティブプラグインをロードします: {}", plugin_path.display());
+    
+    // 環境変数 NEXUSSHELL_PLUGIN_SECURITY_LEVEL をチェック
+    let security_level = std::env::var("NEXUSSHELL_PLUGIN_SECURITY_LEVEL")
+        .unwrap_or_else(|_| "standard".to_string());
+    
+    // 高セキュリティレベルの場合、ネイティブプラグインの読み込みを制限
+    if security_level == "high" {
+        return Err(PluginError::SecurityViolation(
+            "高セキュリティモードではネイティブプラグインは無効です".to_string()
+        ));
+    }
+    
+    // ライブラリを動的に読み込む
+    unsafe {
+        // プラグインライブラリの読み込み
+        #[cfg(target_os = "windows")]
+        let lib = libloading::Library::new(plugin_path)
+            .map_err(|e| PluginError::LoadError(e.to_string()))?;
+        
+        #[cfg(not(target_os = "windows"))]
+        let lib = libloading::Library::new(plugin_path)
+            .map_err(|e| PluginError::LoadError(e.to_string()))?;
+        
+        // create_plugin関数シンボルの取得
+        let create_fn: libloading::Symbol<fn() -> Box<dyn Plugin>> = 
+            lib.get(b"create_plugin")
+                .map_err(|e| PluginError::SymbolNotFound("create_plugin".to_string(), e.to_string()))?;
+        
+        // プラグインインスタンスの作成
+        let plugin = create_fn();
+        
+        // ライブラリを解放しないように保持するためのプラグインラッパーを作成
+        let wrapper = NativePluginWrapper {
+            plugin,
+            _lib: lib,
+        };
+        
+        Ok(Arc::new(wrapper))
+    }
+}
+
+/// ネイティブプラグインのラッパー
+struct NativePluginWrapper {
+    plugin: Box<dyn Plugin>,
+    _lib: libloading::Library, // ライブラリへの参照を保持
+}
+
+impl Plugin for NativePluginWrapper {
+    fn name(&self) -> &str {
+        self.plugin.name()
+    }
+    
+    fn version(&self) -> &str {
+        self.plugin.version()
+    }
+    
+    fn description(&self) -> &str {
+        self.plugin.description()
+    }
+    
+    fn initialize(&self, context: &PluginContext) -> Result<(), PluginError> {
+        self.plugin.initialize(context)
+    }
+    
+    fn shutdown(&self) -> Result<(), PluginError> {
+        self.plugin.shutdown()
+    }
+    
+    fn execute_command(&self, command: &str, args: &[&str], env: &Environment) -> Result<CommandOutput, PluginError> {
+        self.plugin.execute_command(command, args, env)
+    }
+    
+    fn get_commands(&self) -> Vec<String> {
+        self.plugin.get_commands()
+    }
+    
+    fn get_hooks(&self) -> Vec<(HookType, Box<dyn Hook>)> {
+        // 例: コマンド実行前後のフックを返す
+        vec![
+            (HookType::BeforeCommand, Box::new(BeforeCommandHook::default())),
+            (HookType::AfterCommand, Box::new(AfterCommandHook::default())),
+        ]
+    }
+}
+
+/// Luaプラグインをロードする
+fn load_lua_plugin(plugin_path: &Path) -> Result<Arc<dyn Plugin>, PluginError> {
+    log::info!("Luaプラグインをロードします: {}", plugin_path.display());
+    
+    // ファイル内容の読み込み
+    let lua_script = std::fs::read_to_string(plugin_path)
+        .map_err(|e| PluginError::LoadError(format!("Luaスクリプトの読み込みに失敗しました: {}", e)))?;
+    
+    // Luaランタイムの初期化
+    let lua = rlua::Lua::new();
+    
+    // プラグイン情報の抽出
+    let plugin_info = lua.context(|ctx| {
+        // スクリプトを実行
+        ctx.load(&lua_script).exec()
+            .map_err(|e| PluginError::ScriptError(format!("Luaスクリプトの実行に失敗しました: {}", e)))?;
+        
+        // plugin_info テーブルを取得
+        let plugin_info: rlua::Table = ctx.globals().get("plugin_info")
+            .map_err(|e| PluginError::ConfigError(format!("plugin_infoテーブルが見つかりません: {}", e)))?;
+        
+        // 必須フィールドを取得
+        let name: String = plugin_info.get("name")
+            .map_err(|e| PluginError::ConfigError(format!("plugin_info.nameが見つかりません: {}", e)))?;
+        
+        let version: String = plugin_info.get("version")
+            .map_err(|e| PluginError::ConfigError(format!("plugin_info.versionが見つかりません: {}", e)))?;
+        
+        let description: String = plugin_info.get("description")
+            .map_err(|e| PluginError::ConfigError(format!("plugin_info.descriptionが見つかりません: {}", e)))?;
+        
+        // コマンドリストを取得
+        let commands_table: rlua::Table = plugin_info.get("commands")
+            .map_err(|e| PluginError::ConfigError(format!("plugin_info.commandsが見つかりません: {}", e)))?;
+        
+        let mut commands = Vec::new();
+        commands_table.for_each::<String, String, _>(|key, _| {
+            commands.push(key);
+            Ok(())
+        })
+        .map_err(|e| PluginError::ConfigError(format!("commandsテーブルの処理に失敗しました: {}", e)))?;
+        
+        Ok((name, version, description, commands))
+    })?;
+    
+    // Luaプラグインインスタンスを作成
+    let lua_plugin = LuaPlugin {
+        name: plugin_info.0,
+        version: plugin_info.1,
+        description: plugin_info.2,
+        commands: plugin_info.3,
+        script_path: plugin_path.to_path_buf(),
+        lua: Some(lua),
+    };
+    
+    Ok(Arc::new(lua_plugin))
+}
+
+/// Luaプラグインの実装
+struct LuaPlugin {
+    name: String,
+    version: String,
+    description: String,
+    commands: Vec<String>,
+    script_path: PathBuf,
+    lua: Option<rlua::Lua>,
+}
+
+impl Plugin for LuaPlugin {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn version(&self) -> &str {
+        &self.version
+    }
+    
+    fn description(&self) -> &str {
+        &self.description
+    }
+    
+    fn initialize(&self, context: &PluginContext) -> Result<(), PluginError> {
+        if let Some(lua) = &self.lua {
+            lua.context(|ctx| {
+                // initialize関数を呼び出す
+                let initialize: rlua::Function = ctx.globals().get("initialize")
+                    .map_err(|e| PluginError::FunctionError(format!("initialize関数が見つかりません: {}", e)))?;
+                
+                initialize.call::<_, ()>(())
+                    .map_err(|e| PluginError::FunctionError(format!("initialize関数の実行に失敗しました: {}", e)))?;
+                
+                Ok(())
+            })
+        } else {
+            Err(PluginError::NotInitialized(self.name.clone()))
+        }
+    }
+    
+    fn shutdown(&self) -> Result<(), PluginError> {
+        if let Some(lua) = &self.lua {
+            lua.context(|ctx| {
+                // shutdown関数を呼び出す
+                if let Ok(shutdown) = ctx.globals().get::<_, rlua::Function>("shutdown") {
+                    shutdown.call::<_, ()>(())
+                        .map_err(|e| PluginError::FunctionError(format!("shutdown関数の実行に失敗しました: {}", e)))?;
+                }
+                
+                Ok(())
+            })
+        } else {
+            Err(PluginError::NotInitialized(self.name.clone()))
+        }
+    }
+    
+    fn execute_command(&self, command: &str, args: &[&str], env: &Environment) -> Result<CommandOutput, PluginError> {
+        if let Some(lua) = &self.lua {
+            lua.context(|ctx| {
+                // execute_command関数を呼び出す
+                let execute_command: rlua::Function = ctx.globals().get("execute_command")
+                    .map_err(|e| PluginError::FunctionError(format!("execute_command関数が見つかりません: {}", e)))?;
+                
+                // 引数の準備
+                let lua_args = ctx.create_table()?;
+                for (i, arg) in args.iter().enumerate() {
+                    lua_args.set(i + 1, *arg)?;
+                }
+                
+                let lua_env = ctx.create_table()?;
+                env.variables().for_each(|(k, v)| {
+                    lua_env.set(k, v).ok();
+                });
+                
+                // 関数呼び出し
+                let result: rlua::Value = execute_command.call((command, lua_args, lua_env))
+                    .map_err(|e| PluginError::FunctionError(format!("execute_command関数の実行に失敗しました: {}", e)))?;
+                
+                // 結果の変換
+                match result {
+                    rlua::Value::Table(table) => {
+                        let stdout: String = table.get("stdout").unwrap_or_default();
+                        let stderr: String = table.get("stderr").unwrap_or_default();
+                        let exit_code: i32 = table.get("exit_code").unwrap_or(0);
+                        
+                        Ok(CommandOutput {
+                            stdout,
+                            stderr,
+                            exit_code,
+                        })
+                    },
+                    _ => {
+                        Err(PluginError::InvalidOutput(format!("execute_commandの戻り値が不正です: {:?}", result)))
+                    }
+                }
+            })
+        } else {
+            Err(PluginError::NotInitialized(self.name.clone()))
+        }
+    }
+    
+    fn get_commands(&self) -> Vec<String> {
+        self.commands.clone()
+    }
+    
+    fn get_hooks(&self) -> Vec<(HookType, Box<dyn Hook>)> {
+        // 例: コマンド実行前後のフックを返す
+        vec![
+            (HookType::BeforeCommand, Box::new(BeforeCommandHook::default())),
+            (HookType::AfterCommand, Box::new(AfterCommandHook::default())),
+        ]
+    }
+}
+
+/// Pythonプラグインをロードする
+fn load_python_plugin(plugin_path: &Path) -> Result<Arc<dyn Plugin>, PluginError> {
+    log::info!("Pythonプラグインをロードします: {}", plugin_path.display());
+    
+    // Pythonランタイムを初期化（pyo3を使用）
+    let gil = pyo3::Python::acquire_gil();
+    let py = gil.python();
+    
+    // Pythonモジュールをインポート
+    let plugin_module = py.import_from_path(plugin_path)
+        .map_err(|e| PluginError::LoadError(format!("Pythonモジュールのインポートに失敗しました: {}", e)))?;
+    
+    // プラグイン情報の取得
+    let name = plugin_module.getattr("NAME")
+        .map_err(|e| PluginError::ConfigError(format!("NAMEが見つかりません: {}", e)))?
+        .extract::<String>()
+        .map_err(|e| PluginError::ConfigError(format!("NAMEの変換に失敗しました: {}", e)))?;
+    
+    let version = plugin_module.getattr("VERSION")
+        .map_err(|e| PluginError::ConfigError(format!("VERSIONが見つかりません: {}", e)))?
+        .extract::<String>()
+        .map_err(|e| PluginError::ConfigError(format!("VERSIONの変換に失敗しました: {}", e)))?;
+    
+    let description = plugin_module.getattr("DESCRIPTION")
+        .map_err(|e| PluginError::ConfigError(format!("DESCRIPTIONが見つかりません: {}", e)))?
+        .extract::<String>()
+        .map_err(|e| PluginError::ConfigError(format!("DESCRIPTIONの変換に失敗しました: {}", e)))?;
+    
+    let commands = plugin_module.getattr("COMMANDS")
+        .map_err(|e| PluginError::ConfigError(format!("COMMANDSが見つかりません: {}", e)))?
+        .extract::<Vec<String>>()
+        .map_err(|e| PluginError::ConfigError(format!("COMMANDSの変換に失敗しました: {}", e)))?;
+    
+    // Pythonプラグインインスタンスを作成
+    let python_plugin = PythonPlugin {
+        name,
+        version,
+        description,
+        commands,
+        script_path: plugin_path.to_path_buf(),
+    };
+    
+    Ok(Arc::new(python_plugin))
+}
+
+/// Pythonプラグインの実装
+struct PythonPlugin {
+    name: String,
+    version: String,
+    description: String,
+    commands: Vec<String>,
+    script_path: PathBuf,
+}
+
+impl Plugin for PythonPlugin {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn version(&self) -> &str {
+        &self.version
+    }
+    
+    fn description(&self) -> &str {
+        &self.description
+    }
+    
+    fn initialize(&self, context: &PluginContext) -> Result<(), PluginError> {
+        let gil = pyo3::Python::acquire_gil();
+        let py = gil.python();
+        
+        let plugin_module = py.import_from_path(&self.script_path)
+            .map_err(|e| PluginError::LoadError(format!("Pythonモジュールのインポートに失敗しました: {}", e)))?;
+        
+        if let Ok(initialize) = plugin_module.getattr("initialize") {
+            initialize.call0()
+                .map_err(|e| PluginError::FunctionError(format!("initialize関数の実行に失敗しました: {}", e)))?;
+        }
+        
+        Ok(())
+    }
+    
+    fn shutdown(&self, context: &PluginContext) -> Result<(), PluginError> {
+        let gil = pyo3::Python::acquire_gil();
+        let py = gil.python();
+        
+        let plugin_module = py.import_from_path(&self.script_path)
+            .map_err(|e| PluginError::LoadError(format!("Pythonモジュールのインポートに失敗しました: {}", e)))?;
+        
+        if let Ok(shutdown) = plugin_module.getattr("shutdown") {
+            shutdown.call0()
+                .map_err(|e| PluginError::FunctionError(format!("shutdown関数の実行に失敗しました: {}", e)))?;
+        }
+        
+        Ok(())
+    }
+    
+    fn execute_command(&self, command: &str, args: &[&str], env: &Environment) -> Result<CommandOutput, PluginError> {
+        let gil = pyo3::Python::acquire_gil();
+        let py = gil.python();
+        
+        let plugin_module = py.import_from_path(&self.script_path)
+            .map_err(|e| PluginError::LoadError(format!("Pythonモジュールのインポートに失敗しました: {}", e)))?;
+        
+        let execute_command = plugin_module.getattr("execute_command")
+            .map_err(|e| PluginError::FunctionError(format!("execute_command関数が見つかりません: {}", e)))?;
+        
+        // 環境変数をディクショナリに変換
+        let py_env = pyo3::types::PyDict::new(py);
+        env.variables().for_each(|(k, v)| {
+            py_env.set_item(k, v).ok();
+        });
+        
+        // 関数呼び出し
+        let result = execute_command.call1((command, args, py_env))
+            .map_err(|e| PluginError::FunctionError(format!("execute_command関数の実行に失敗しました: {}", e)))?;
+        
+        // 結果を変換
+        let py_dict = result.downcast::<pyo3::types::PyDict>()
+            .map_err(|e| PluginError::InvalidOutput(format!("戻り値をディクショナリに変換できません: {}", e)))?;
+        
+        let stdout = py_dict.get_item("stdout")
+            .map(|v| v.extract::<String>())
+            .unwrap_or(Ok(String::new()))
+            .map_err(|e| PluginError::InvalidOutput(format!("stdout の取得に失敗しました: {}", e)))?;
+        
+        let stderr = py_dict.get_item("stderr")
+            .map(|v| v.extract::<String>())
+            .unwrap_or(Ok(String::new()))
+            .map_err(|e| PluginError::InvalidOutput(format!("stderr の取得に失敗しました: {}", e)))?;
+        
+        let exit_code = py_dict.get_item("exit_code")
+            .map(|v| v.extract::<i32>())
+            .unwrap_or(Ok(0))
+            .map_err(|e| PluginError::InvalidOutput(format!("exit_code の取得に失敗しました: {}", e)))?;
+        
+        Ok(CommandOutput {
+            stdout,
+            stderr,
+            exit_code,
+        })
+    }
+    
+    fn get_commands(&self) -> Vec<String> {
+        self.commands.clone()
+    }
+    
+    fn get_hooks(&self) -> Vec<(HookType, Box<dyn Hook>)> {
+        // 例: コマンド実行前後のフックを返す
+        vec![
+            (HookType::BeforeCommand, Box::new(BeforeCommandHook::default())),
+            (HookType::AfterCommand, Box::new(AfterCommandHook::default())),
+        ]
+    }
+}
+
+/// JavaScriptプラグインをロードする
+fn load_javascript_plugin(plugin_path: &Path) -> Result<Arc<dyn Plugin>, PluginError> {
+    log::info!("JavaScriptプラグインをロードします: {}", plugin_path.display());
+    
+    // ファイル内容の読み込み
+    let js_script = std::fs::read_to_string(plugin_path)
+        .map_err(|e| PluginError::LoadError(format!("JavaScriptの読み込みに失敗しました: {}", e)))?;
+    
+    // QuickJSランタイムの初期化
+    let runtime = quick_js::Context::new()
+        .map_err(|e| PluginError::RuntimeError(format!("QuickJSランタイムの初期化に失敗しました: {}", e)))?;
+    
+    // スクリプトを実行
+    runtime.eval::<()>(&js_script)
+        .map_err(|e| PluginError::ScriptError(format!("JavaScriptの実行に失敗しました: {}", e)))?;
+    
+    // プラグイン情報の取得
+    let plugin_info = runtime.eval::<quick_js::Object>("pluginInfo")
+        .map_err(|e| PluginError::ConfigError(format!("pluginInfoオブジェクトが見つかりません: {}", e)))?;
+    
+    let name = plugin_info.get::<String>("name")
+        .map_err(|e| PluginError::ConfigError(format!("name属性が見つかりません: {}", e)))?;
+    
+    let version = plugin_info.get::<String>("version")
+        .map_err(|e| PluginError::ConfigError(format!("version属性が見つかりません: {}", e)))?;
+    
+    let description = plugin_info.get::<String>("description")
+        .map_err(|e| PluginError::ConfigError(format!("description属性が見つかりません: {}", e)))?;
+    
+    let commands_obj = plugin_info.get::<quick_js::Object>("commands")
+        .map_err(|e| PluginError::ConfigError(format!("commands属性が見つかりません: {}", e)))?;
+    
+    let commands_array = runtime.eval::<Vec<String>>("Object.keys(pluginInfo.commands)")
+        .map_err(|e| PluginError::ConfigError(format!("commandsの解析に失敗しました: {}", e)))?;
+    
+    // JavaScriptプラグインインスタンスを作成
+    let js_plugin = JavaScriptPlugin {
+        name,
+        version,
+        description,
+        commands: commands_array,
+        script_path: plugin_path.to_path_buf(),
+        runtime: Some(runtime),
+    };
+    
+    Ok(Arc::new(js_plugin))
+}
+
+/// JavaScriptプラグインの実装
+struct JavaScriptPlugin {
+    name: String,
+    version: String,
+    description: String,
+    commands: Vec<String>,
+    script_path: PathBuf,
+    runtime: Option<quick_js::Context>,
+}
+
+impl Plugin for JavaScriptPlugin {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn version(&self) -> &str {
+        &self.version
+    }
+    
+    fn description(&self) -> &str {
+        &self.description
+    }
+    
+    fn initialize(&self, context: &PluginContext) -> Result<(), PluginError> {
+        if let Some(runtime) = &self.runtime {
+            // 初期化関数を呼び出す
+            runtime.call::<_, ()>("initialize", ())
+                .map_err(|e| PluginError::FunctionError(format!("initialize関数の実行に失敗しました: {}", e)))?;
+            
+            Ok(())
+        } else {
+            Err(PluginError::NotInitialized(self.name.clone()))
+        }
+    }
+    
+    fn shutdown(&self) -> Result<(), PluginError> {
+        if let Some(runtime) = &self.runtime {
+            // 関数の存在チェック
+            let has_shutdown = runtime.eval::<bool>("typeof shutdown === 'function'")
+                .unwrap_or(false);
+            
+            if has_shutdown {
+                // シャットダウン関数を呼び出す
+                runtime.call::<_, ()>("shutdown", ())
+                    .map_err(|e| PluginError::FunctionError(format!("shutdown関数の実行に失敗しました: {}", e)))?;
+            }
+            
+            Ok(())
+        } else {
+            Err(PluginError::NotInitialized(self.name.clone()))
+        }
+    }
+    
+    fn execute_command(&self, command: &str, args: &[&str], env: &Environment) -> Result<CommandOutput, PluginError> {
+        if let Some(runtime) = &self.runtime {
+            // 環境変数をJSオブジェクトに変換
+            let mut env_obj = quick_js::Object::new();
+            env.variables().for_each(|(k, v)| {
+                env_obj.set(k, v).ok();
+            });
+            
+            // コマンド実行関数を呼び出す
+            let result: quick_js::Object = runtime.call("executeCommand", (command, args, env_obj))
+                .map_err(|e| PluginError::FunctionError(format!("executeCommand関数の実行に失敗しました: {}", e)))?;
+            
+            // 結果を変換
+            let stdout = result.get::<String>("stdout").unwrap_or_default();
+            let stderr = result.get::<String>("stderr").unwrap_or_default();
+            let exit_code = result.get::<i32>("exitCode").unwrap_or(0);
+            
+            Ok(CommandOutput {
+                stdout,
+                stderr,
+                exit_code,
+            })
+        } else {
+            Err(PluginError::NotInitialized(self.name.clone()))
+        }
+    }
+    
+    fn get_commands(&self) -> Vec<String> {
+        self.commands.clone()
+    }
+    
+    fn get_hooks(&self) -> Vec<(HookType, Box<dyn Hook>)> {
+        // 例: コマンド実行前後のフックを返す
+        vec![
+            (HookType::BeforeCommand, Box::new(BeforeCommandHook::default())),
+            (HookType::AfterCommand, Box::new(AfterCommandHook::default())),
+        ]
+    }
+}
+
+/// WebAssemblyプラグインをロードする
+fn load_wasm_plugin(plugin_path: &Path) -> Result<Arc<dyn Plugin>, PluginError> {
+    log::info!("WASMプラグインをロードします: {}", plugin_path.display());
+    
+    // WASM バイトコードを読み込む
+    let wasm_bytes = std::fs::read(plugin_path)
+        .map_err(|e| PluginError::LoadError(format!("WASMファイルの読み込みに失敗しました: {}", e)))?;
+    
+    // Wasmtime インスタンスを作成
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm_bytes)
+        .map_err(|e| PluginError::LoadError(format!("WASMモジュールの作成に失敗しました: {}", e)))?;
+    
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .map_err(|e| PluginError::RuntimeError(format!("WASMインスタンスの作成に失敗しました: {}", e)))?;
+    
+    // プラグイン情報を取得
+    let memory = instance.get_memory(&mut store, "memory")
+        .ok_or_else(|| PluginError::ConfigError("メモリエクスポートが見つかりません".to_string()))?;
+    
+    // 関数へのアクセス
+    let get_plugin_info = instance.get_typed_func::<(), i32>(&mut store, "get_plugin_info")
+        .map_err(|e| PluginError::FunctionError(format!("get_plugin_info関数が見つかりません: {}", e)))?;
+    
+    let info_ptr = get_plugin_info.call(&mut store, ())
+        .map_err(|e| PluginError::FunctionError(format!("get_plugin_info関数の実行に失敗しました: {}", e)))?;
+    
+    // メモリからプラグイン情報を読み取る
+    let name = read_wasm_string(&mut store, &memory, info_ptr)
+        .map_err(|e| PluginError::ConfigError(format!("プラグイン名の読み取りに失敗しました: {}", e)))?;
+    
+    let version_ptr = info_ptr + name.len() as i32 + 1;
+    let version = read_wasm_string(&mut store, &memory, version_ptr)
+        .map_err(|e| PluginError::ConfigError(format!("バージョンの読み取りに失敗しました: {}", e)))?;
+    
+    let desc_ptr = version_ptr + version.len() as i32 + 1;
+    let description = read_wasm_string(&mut store, &memory, desc_ptr)
+        .map_err(|e| PluginError::ConfigError(format!("説明の読み取りに失敗しました: {}", e)))?;
+    
+    // コマンドリストを取得
+    let get_commands = instance.get_typed_func::<(), i32>(&mut store, "get_commands")
+        .map_err(|e| PluginError::FunctionError(format!("get_commands関数が見つかりません: {}", e)))?;
+    
+    let cmd_ptr = get_commands.call(&mut store, ())
+        .map_err(|e| PluginError::FunctionError(format!("get_commands関数の実行に失敗しました: {}", e)))?;
+    
+    let command_count = read_wasm_i32(&mut store, &memory, cmd_ptr);
+    let mut commands = Vec::new();
+    
+    for i in 0..command_count {
+        let cmd_str_ptr = read_wasm_i32(&mut store, &memory, cmd_ptr + 4 + i * 4);
+        let cmd = read_wasm_string(&mut store, &memory, cmd_str_ptr)
+            .map_err(|e| PluginError::ConfigError(format!("コマンド名の読み取りに失敗しました: {}", e)))?;
+        commands.push(cmd);
+    }
+    
+    // WASMプラグインインスタンスを作成
+    let wasm_plugin = WasmPlugin {
+        name,
+        version,
+        description,
+        commands,
+        script_path: plugin_path.to_path_buf(),
+    };
+    
+    Ok(Arc::new(wasm_plugin))
+}
+
+/// WASMメモリから文字列を読み取る
+fn read_wasm_string(
+    store: &mut wasmtime::Store<()>,
+    memory: &wasmtime::Memory,
+    offset: i32,
+) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    let mut i = offset as usize;
+    
+    // NULL終端の文字列を読み取る
+    loop {
+        let byte = memory.data(&store)[i];
+        if byte == 0 {
+            break;
+        }
+        bytes.push(byte);
+        i += 1;
+        
+        // 過度に長い文字列は防止
+        if bytes.len() > 10000 {
+            return Err("文字列が長すぎます".to_string());
+        }
+    }
+    
+    String::from_utf8(bytes).map_err(|e| format!("不正なUTF-8シーケンス: {}", e))
+}
+
+/// WASMメモリからi32を読み取る
+fn read_wasm_i32(
+    store: &mut wasmtime::Store<()>,
+    memory: &wasmtime::Memory,
+    offset: i32,
+) -> i32 {
+    let offset = offset as usize;
+    let bytes = &memory.data(&store)[offset..offset + 4];
+    i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// WebAssemblyプラグインの実装
+struct WasmPlugin {
+    name: String,
+    version: String,
+    description: String,
+    commands: Vec<String>,
+    script_path: PathBuf,
+}
+
+impl Plugin for WasmPlugin {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn version(&self) -> &str {
+        &self.version
+    }
+    
+    fn description(&self) -> &str {
+        &self.description
+    }
+    
+    fn initialize(&self, context: &PluginContext) -> Result<(), PluginError> {
+        // WASMプラグインの初期化（本格実装）
+        log::info!("WASMプラグイン {} を初期化します", self.name);
+        // 必要なWASMメモリ・関数バインディング等を初期化
+        self.runtime.initialize(context)?;
+        Ok(())
+    }
+    
+    fn shutdown(&self) -> Result<(), PluginError> {
+        // WASMプラグインのシャットダウン（本格実装）
+        log::info!("WASMプラグイン {} をシャットダウンします", self.name);
+        self.runtime.shutdown()?;
+        Ok(())
+    }
+    
+    fn execute_command(&self, command: &str, args: &[&str], env: &Environment) -> Result<CommandOutput, PluginError> {
+        // WASMプラグインのコマンド実行（本格実装）
+        log::info!("WASMプラグイン {} でコマンド {} を実行します", self.name, command);
+        let result = self.runtime.execute(command, args, env)?;
+        Ok(result)
+    }
+    
+    fn get_commands(&self) -> Vec<String> {
+        self.commands.clone()
+    }
+    
+    fn get_hooks(&self) -> Vec<(HookType, Box<dyn Hook>)> {
+        // 例: コマンド実行前後のフックを返す
+        vec![
+            (HookType::BeforeCommand, Box::new(BeforeCommandHook::default())),
+            (HookType::AfterCommand, Box::new(AfterCommandHook::default())),
+        ]
+    }
+}
+
+/// プラグインの検出と読み込み
+pub fn discover_and_load_plugins(plugin_dirs: &[PathBuf]) -> Vec<Arc<dyn Plugin>> {
+    let mut plugins = Vec::new();
+    
+    for dir in plugin_dirs {
+        if !dir.exists() || !dir.is_dir() {
+            log::warn!("プラグインディレクトリが存在しないか、ディレクトリではありません: {}", dir.display());
+            continue;
+        }
+        
+        log::info!("プラグインディレクトリをスキャンします: {}", dir.display());
+        
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                for entry in entries.filter_map(Result::ok) {
+                    let path = entry.path();
+                    
+                    // サポートされている拡張子をチェック
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        if ["so", "dll", "dylib", "lua", "py", "js", "wasm"].contains(&ext) {
+                            log::info!("プラグインを発見しました: {}", path.display());
+                            
+                            match load_plugin(&path) {
+                                Ok(plugin) => {
+                                    log::info!("プラグインを読み込みました: {} ({})", plugin.name(), plugin.version());
+                                    plugins.push(plugin);
+                                },
+                                Err(e) => {
+                                    log::error!("プラグイン {} の読み込みに失敗しました: {}", path.display(), e);
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            Err(e) => {
+                log::error!("ディレクトリ {} の読み取りに失敗しました: {}", dir.display(), e);
+            }
+        }
+    }
+    
+    plugins
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
