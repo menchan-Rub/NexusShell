@@ -1,359 +1,99 @@
-﻿# 🚀 NexusShell v2.2.0
-## 世界最高品質のエンタープライズシェル
+﻿## NexusShell v0.1.0 - 自作OSのためのミニマルシェル
 
-[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
-[![Quality](https://img.shields.io/badge/quality-world--class-gold.svg)]()
+[](https://github.com/rust-lang/rust)
+[](https://opensource.org/licenses/MIT)
+[](https://www.google.com/search?q=https://github.com/menchan-Rub/NexusShell) \#\#\# 🚀 プロジェクト概要
 
-**NexusShell**は、Rustで構築された次世代のエンタープライズグレードシェルです。従来のシェルの限界を超越し、現代の開発者とシステム管理者のニーズに応える革新的な機能を提供します。
+こんにちは！中学3年生プログラマーのAquaです。
 
----
+この「NexusShell」は、僕が将来的に**自作するOSに組み込むことを夢見て、Rust言語でゼロから開発しているミニマルなシェル環境**です。
 
-## 🌟 主要機能
+世の中にはBashやZsh、PowerShellなど、とても高機能で素晴らしいシェルがたくさんありますよね。でも、それらを僕の自作OSにそのまま組み込むのは、規模的にも僕の「すべてを自分の手で理解し、制御したい」という思想的にも、ちょっと違うなと感じていました。僕が目指すのは、**完全にコントロールでき、究極に軽量で、本質的な機能に特化したシェル**。その壮大な夢の第一歩として、このNexusShellの開発を始めました。
 
-### 🔥 **最先端技術**
-- **Rust製**: メモリ安全性とゼロコスト抽象化
-- **非同期処理**: Tokioベースの高性能実行
-- **型安全**: コンパイル時エラー検出
-- **クロスプラットフォーム**: Windows/Linux/macOS対応
+**現在のNexusShellは、主に開発とテストのしやすさを考慮し、Windows環境で動作確認できるように構築されています。** 将来的な自作OSへの統合を最終目標としつつも、まずは既存の環境で基本的な機能と動作の検証をコツコツと行っている段階です。
 
-### ⚡ **圧倒的パフォーマンス**
-- **リアルタイム監視**: コマンド実行時間をナノ秒単位で測定
-- **最適化**: リリースビルドで最大性能
-- **効率性**: CPU使用率0.1%の軽量動作
-- **並行処理**: マルチコア活用
+このシェルを通じて、僕自身の低レイヤーへの探求心、そして「自分だけのOSを動かす」という夢の実現に向けて日々奮闘しています。
 
-### 🛡️ **エンタープライズセキュリティ**
-- **サンドボックス実行**: 安全な実行環境
-- **監査証跡**: 全コマンドの実行ログ
-- **権限制御**: 細かいアクセス制御
-- **暗号化対応**: データ保護機能
+### ✨ 主な機能（現在実装済み）
 
-### 🎯 **革新的UX**
-- **インテリジェント補完**: TABキーで高度な補完
-- **包括的ヘルプ**: 詳細なコマンド説明
-- **美しい出力**: 構造化された情報表示
-- **統計情報**: リアルタイム性能メトリクス
+現在のNexusShellは、僕がRustで独自に実装した以下の主要な組み込みコマンドとシェル機能を提供します。既存のOSSライブラリへの依存は極力減らし、`rustyline`のような入力補助のためのクレートは利便性のために一部使用しています。
 
----
+  * **基本的なファイル・ディレクトリ操作**
+      * `ls`: ファイルとディレクトリの一覧表示（`-a`, `-l`, `-h`, `-t`, `-r`, `-S`オプション対応）
+      * `cd`: カレントディレクトリの変更
+      * `mkdir`: ディレクトリの作成
+      * `rm`: ファイルやディレクトリの削除
+  * **テキストファイル操作**
+      * `cat`: ファイルの内容表示
+      * `grep`: ファイル内の文字列検索（正規表現対応）
+      * `find`: ファイルやディレクトリの検索（タイプ指定対応）
+  * **システム・ユーティリティ**
+      * `echo`: 文字列の出力
+      * `sort`: テキストのソート
+      * `clear_screen`: ターミナル画面のクリア
+      * `version`: シェルのバージョン情報表示
+      * `help`: コマンドリストの表示
+      * `whoami`: 現在のユーザー名、ホスト名の表示
+      * `show_performance_metrics`: シェルの簡易的なパフォーマンスメトリクス表示（CPU使用率、メモリ使用量）
+  * **シェルとしての基本機能**
+      * **対話型プロンプト**: `ユーザー名@ホスト名:カレントディレクトリ$` 形式のプロンプト
+      * **コマンド履歴**: 上下矢印キーによるコマンド履歴の参照
+      * **エイリアス機能**: `ll`, `h`などの定義済みエイリアス（内部処理で解決）
+      * **環境変数**: `environment_vars`による簡易的な環境変数管理
+      * **外部コマンド実行**: `std::process::Command`による外部コマンドの実行
 
-## 🚀 クイックスタート
+### 🎯 設計思想と将来の展望
 
-### インストール
+NexusShellは、僕が描く理想のシェル、そして自作OSの実現に向けて、以下の思想に基づいて開発を進めています。
+
+1.  **ミニマル＆軽量**:
+    必要最低限の機能に絞り込み、リソース消費を最小限に抑えます。僕の自作OSの基盤となることを考えると、この軽さは何よりも重要です。
+2.  **完全な制御**:
+    外部依存を極力減らし、すべての挙動を僕自身が理解し、完全に制御できることを目指しています。これは、OSの根幹に触れるシェルだからこそ、何よりも重視したい点です。
+3.  **パフォーマンス重視**:
+    Rustの持つ強力な特性を最大限に活かし、高速で効率的なコマンド実行を実現します。僕が普段触れている低レイヤーの世界で得た知識を、ここに注ぎ込んでいます。
+4.  **将来の自作OSへの統合**:
+    現在のNexusShellはWindows上で動作していますが、これはあくまで開発と検証のための一時的なステップです。最終的には僕が開発中の**自作OSの標準シェル**として機能させることを目標としています。そのため、現在はRustの標準ライブラリ（`std::fs`や`std::process`など）に依存している部分も、将来的には**自作OSのシステムコールを直接呼び出す形**に書き換えていく計画です。
+      * **例えば**: `std::fs::read_dir`のようなファイルシステム操作は、自作OSのカーネルが提供する専用のシステムコールに置き換えられます。また、`std::process::Command`による外部コマンド実行も、OSカーネルの`fork`/`exec`に相当する機能と連携する形で、真のプロセス管理をシェル側で担うように進化させていきます。
+
+### 💻 開発環境とビルド方法
+
+**動作確認環境**: Windows (WSLやLinux/macOS環境でもRustが動作すればビルド・実行可能です)
+
+**必要ツール**:
+
+  * Rust (Rustup経由でのインストールを推奨)
+
+**ビルド方法**:
 
 ```bash
-# リポジトリをクローン
-git clone https://github.com/menchan-Rub/NexusShell.git
+# GitHubからリポジトリをクローン 
+git clone https://github.com/menchan-Rub/NexusShell.git 
 cd NexusShell
 
-# ビルド（リリース版）
+# プロジェクトをビルド
 cargo build --release
 
 # 実行
-./target/release/nexusshell
+./target/release/nexus_shell.exe # Windowsの場合
+# または
+./target/release/nexus_shell # Linux/macOSの場合
 ```
 
-### 初回起動
+### 🤝 貢献とフィードバック
 
-```
-NexusShell v2.2.0 - World's Most Advanced Shell
-Type 'help' for comprehensive command list, 'exit' to quit
-Aqua@hostname:directory$ 
-```
+NexusShellは、僕の個人的な探求プロジェクトですが、もしこの僕の挑戦に少しでも興味を持っていただけたら、ぜひフィードバックやご意見をお寄せください！
+一緒にこのシェルを成長させていけることを楽しみにしています。
 
----
+-----
 
-## 📚 コマンドリファレンス
+**© 2025 Aqua-Studev**
 
-### 🏠 **コアコマンド**
+**連絡先**
 
-| コマンド | 説明 | 例 |
-|---------|------|-----|
-| `help` | 包括的ヘルプシステム | `help` |
-| `version` | 詳細バージョン情報 | `version` |
-| `stats` | 高度使用統計とメトリクス | `stats` |
-| `features` | 利用可能な高度機能一覧 | `features` |
-| `performance` | 詳細パフォーマンスメトリクス | `performance` |
-| `system` | 包括的システム情報 | `system` |
-| `clear`, `cls` | 画面クリア | `clear` |
-| `exit`, `quit` | シェル終了 | `exit` |
+  * Twitter: [@aqua\_developer](https://x.com/aqua_developer)
+  * GitHub: [aqua-studev](https://github.com/menchan-Rub)
+  * Zenn: [aqua-studev](https://zenn.dev/aqua_studev)
+  * Qiita:  [Aqua-Studev](https://qiita.com/Aqua-Studev) 
 
-### 📁 **ファイルシステム操作**
-
-| コマンド | オプション | 説明 | 例 |
-|---------|-----------|------|-----|
-| `ls`, `dir` | `-l`, `-a`, `-h`, `-t`, `-r`, `-S` | ディレクトリ内容表示 | `ls -la` |
-| `cd` | | ディレクトリ変更 | `cd /home/user` |
-| `pwd` | | 現在のディレクトリ表示 | `pwd` |
-| `mkdir` | `-p` | ディレクトリ作成 | `mkdir -p dir/subdir` |
-| `rmdir` | | 空ディレクトリ削除 | `rmdir emptydir` |
-| `touch` | | ファイル作成・タイムスタンプ更新 | `touch file.txt` |
-| `rm` | `-r`, `-f`, `-i` | ファイル・ディレクトリ削除 | `rm -rf directory` |
-| `cp` | `-r`, `-p`, `-v` | ファイル・ディレクトリコピー | `cp -rv src dest` |
-| `mv` | | ファイル・ディレクトリ移動 | `mv old.txt new.txt` |
-
-### 📄 **ファイル操作**
-
-| コマンド | オプション | 説明 | 例 |
-|---------|-----------|------|-----|
-| `cat` | | ファイル内容表示（シンタックスハイライト） | `cat file.txt` |
-| `head` | `-n`, `-c` | ファイル先頭表示 | `head -n 10 file.txt` |
-| `tail` | `-n`, `-f` | ファイル末尾表示 | `tail -f log.txt` |
-| `wc` | `-l`, `-w`, `-c` | 行・単語・文字数カウント | `wc -l file.txt` |
-| `grep` | `-i`, `-r`, `-n` | パターン検索 | `grep -i "pattern" file.txt` |
-| `find` | `-name`, `-type`, `-size` | ファイル検索 | `find . -name "*.txt"` |
-| `tree` | `-a`, `-d`, `-L` | ディレクトリツリー表示 | `tree -L 2` |
-| `du` | `-h`, `-s`, `-a` | ディスク使用量 | `du -h directory` |
-| `df` | `-h` | ファイルシステム使用量 | `df -h` |
-
-### ✏️ **テキスト処理**
-
-| コマンド | オプション | 説明 | 例 |
-|---------|-----------|------|-----|
-| `echo` | `-n`, `-e` | テキスト出力 | `echo "Hello World"` |
-| `sort` | `-r`, `-n`, `-u` | 行ソート | `sort -n numbers.txt` |
-| `uniq` | `-c`, `-d` | 重複削除 | `uniq -c file.txt` |
-| `cut` | `-d`, `-f`, `-c` | 列抽出 | `cut -d',' -f1 data.csv` |
-| `sed` | | ストリームエディタ | `sed 's/old/new/g' file.txt` |
-| `awk` | | パターン処理言語 | `awk '{print $1}' file.txt` |
-| `tr` | | 文字変換 | `tr 'a-z' 'A-Z'` |
-
----
-
-## 🔧 高度機能
-
-### 📊 **パフォーマンス監視**
-
-NexusShellは実行中のすべてのメトリクスを追跡します：
-
-```
-===== NEXUSSHELL ADVANCED STATISTICS =====
-
-EXECUTION METRICS:
-Total Commands: 25
-Successful: 23
-Failed: 2
-Success Rate: 92.0%
-Error Rate: 8.0%
-
-PERFORMANCE METRICS:
-Total Execution Time: 125.456ms
-Average Command Time: 5.018ms
-Commands Per Second: 0.12
-I/O Operations: 15
-Peak Performance: Optimized
-```
-
-### 🛡️ **セキュリティ機能**
-
-```
-SECURITY STATUS:
-Execution Mode: Sandboxed
-Permissions: Controlled
-Security Level: Enterprise
-Audit Trail: Enabled
-Sandbox Status: Active
-```
-
-### 🎛️ **機能管理**
-
-10の高度機能カテゴリを動的に制御：
-
-```bash
-# 機能一覧表示
-features
-
-# 特定機能を有効化
-enable security_tools
-
-# 特定機能を無効化
-disable network_tools
-```
-
-### 📈 **システム情報**
-
-```
-HARDWARE INFORMATION:
-CPU Cores: 16
-Memory: Available
-Storage: Accessible
-Network: Connected
-
-RUNTIME ENVIRONMENT:
-Session Uptime: 185.43s
-Commands Executed: 25
-Active Jobs: 0
-Shell Features: 10
-```
-
----
-
-## 🔗 パイプ・リダイレクト
-
-NexusShellは標準的なシェル機能をサポート：
-
-```bash
-# パイプ
-ls -la | grep ".txt" | wc -l
-
-# 出力リダイレクト
-echo "Hello" > file.txt
-echo "World" >> file.txt
-
-# 入力リダイレクト
-sort < unsorted.txt
-
-# バックグラウンド実行
-long_running_command &
-```
-
----
-
-## ⚙️ 設定
-
-### 環境変数
-
-NexusShellは標準的な環境変数を認識：
-
-- `HOME` - ホームディレクトリ
-- `PATH` - 実行パス
-- `EDITOR` - デフォルトエディタ
-- その他59の環境変数
-
-### エイリアス
-
-便利なエイリアスが事前設定：
-
-```bash
-ll    -> ls -la
-la    -> ls -A
-l     -> ls -CF
-..    -> cd ..
-...   -> cd ../..
-....  -> cd ../../..
-h     -> history
-c     -> clear
-q     -> exit
-```
-
----
-
-## 🚀 パフォーマンス
-
-### ベンチマーク結果
-
-| メトリクス | NexusShell | Bash | PowerShell |
-|-----------|------------|------|------------|
-| 起動時間 | 5.36ms | 45ms | 1.2s |
-| コマンド実行 | 2.764ms | 15ms | 25ms |
-| メモリ使用量 | 1.04MB | 8MB | 45MB |
-| CPU使用率 | 0.1% | 2.5% | 5.2% |
-
-### 最適化機能
-
-- **コンパイル時最適化**: `-O3`レベル
-- **LTO (Link Time Optimization)**: 有効
-- **コードユニット最小化**: 単一ユニット
-- **パニック最適化**: `abort`モード
-
----
-
-## 🛠️ 開発
-
-### ビルド要件
-
-- **Rust**: 1.70以上
-- **Cargo**: 最新版
-- **OS**: Windows 10+, Linux, macOS
-
-### 開発ビルド
-
-```bash
-# デバッグビルド
-cargo build
-
-# テスト実行
-cargo test
-
-# リリースビルド
-cargo build --release
-
-# Linting
-cargo clippy
-
-# フォーマット
-cargo fmt
-```
-
-### 依存関係
-
-主要な依存関係：
-
-- `tokio` - 非同期ランタイム
-- `rustyline` - 行エディタ
-- `regex` - 正規表現
-- `walkdir` - ディレクトリ走査
-- `chrono` - 日時処理
-- `crossterm` - クロスプラットフォーム端末制御
-
----
-
-## 📈 ロードマップ
-
-### v2.3.0 (予定)
-- [ ] プラグインシステム
-- [ ] カスタムテーマ
-- [ ] 高度なジョブ制御
-- [ ] ネットワーク機能拡張
-
-### v3.0.0 (予定)
-- [ ] GUI統合
-- [ ] AI支援機能
-- [ ] クラウド連携
-- [ ] 分散実行
-
----
-
-## 🤝 コントリビューション
-
-貢献を歓迎します！
-
-1. このリポジトリをフォーク
-2. 機能ブランチを作成 (`git checkout -b feature/amazing-feature`)
-3. 変更をコミット (`git commit -m 'Add amazing feature'`)
-4. ブランチにプッシュ (`git push origin feature/amazing-feature`)
-5. プルリクエストを作成
-
----
-
-## 📄 ライセンス
-
-このプロジェクトはMITライセンスの下で公開されています。詳細は[LICENSE](LICENSE)ファイルを参照してください。
-
----
-
-## 🙏 謝辞
-
-- Rustコミュニティ
-- オープンソースコントリビューター
-- 全てのテスターとフィードバック提供者
-
----
-
-## 📞 サポート
-
-- **Issues**: [GitHub Issues](https://github.com/menchan-Rub/NexusShell/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/menchan-Rub/NexusShell/discussions)
-- **Wiki**: [GitHub Wiki](https://github.com/menchan-Rub/NexusShell/wiki)
-
----
-
-<div align="center">
-
-**🚀 NexusShell - 未来のシェル、今ここに 🚀**
-
-Made with ❤️ by [menchan-Rub](https://github.com/menchan-Rub)
-
-</div>
- 
+-----
