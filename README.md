@@ -2,7 +2,8 @@
 
 [](https://github.com/rust-lang/rust)
 [](https://opensource.org/licenses/MIT)
-[](https://www.google.com/search?q=https://github.com/menchan-Rub/NexusShell) \#\#\# 🚀 プロジェクト概要
+[](https://www.google.com/search?q=https://github.com/menchan-Rub/NexusShell) 
+### 🚀 プロジェクト概要
 
 こんにちは！中学3年生プログラマーのAquaです。
 
@@ -92,8 +93,8 @@ NexusShellは、僕の個人的な探求プロジェクトですが、もしこ�
 **連絡先**
 
   * Twitter: [@aqua\_developer](https://x.com/aqua_developer)
-  * GitHub: [aqua-studev](https://github.com/menchan-Rub)
-  * Zenn: [aqua-studev](https://zenn.dev/aqua_studev)
+  * GitHub: [menchan-Rub](https://github.com/menchan-Rub)
+  * Zenn: [menchan_rub](https://zenn.dev/menchan_rub)
   * Qiita:  [Aqua-Studev](https://qiita.com/Aqua-Studev) 
 
 -----
