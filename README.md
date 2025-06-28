@@ -235,5 +235,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 <div align="center">
 
 **Made with ❤️ by the NexusShell Team**
-
+  * Twitter: [@aqua\_developer](https://x.com/aqua_developer)
+  * GitHub: [menchan-Rub](https://github.com/menchan-Rub)
+  * Zenn: [menchan_rub](https://zenn.dev/menchan_rub)
+  * Qiita:  [Aqua-Studev](https://qiita.com/Aqua-Studev) 
 </div> 
+
